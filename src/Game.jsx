@@ -45,7 +45,7 @@ const CONFIG = {
 // ─────────────────────────────────────────────────────────────────
 const spawnHeart = (app, x, y) => {
   const g = new PIXI.Graphics();
-  g.beginFill(0xff6b9d);
+  g.beginFill(0xFFB5B5);
   g.moveTo(0, -8);
   g.bezierCurveTo( 8, -16,  18, -6, 0,  8);
   g.bezierCurveTo(-18, -6, -8, -16, 0, -8);
