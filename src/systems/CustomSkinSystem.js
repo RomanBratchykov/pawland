@@ -93,16 +93,20 @@ export class CustomSkinSystem extends System {
     const skeleton  = spine.instance.skeleton;
     const container = spine.container;
 
+    // Працюємо тільки з реально намальованими частинами.
+    const drawableParts = Object.entries(parts).filter(([, canvas]) => this._hasContent(canvas));
+
+    if (drawableParts.length === 0) {
+      this._active = false;
+      console.log('[CustomSkin] No non-empty parts to apply');
+      return;
+    }
+
     // Ховаємо оригінальні слоти
-    this._hideOriginalSlots(skeleton, parts);
+    this._hideOriginalSlots(skeleton, drawableParts.map(([partId]) => partId));
 
     // Для кожної намальованої частини створюємо спрайти
-    Object.entries(parts).forEach(([partId, canvas]) => {
-      // Перевіряємо чи canvas не порожній
-      if (!this._hasContent(canvas)) {
-        console.log(`[CustomSkin] Part '${partId}' is empty, skipping`);
-        return;
-      }
+    drawableParts.forEach(([partId, canvas]) => {
 
       const cfg = PART_MAP[partId];
       if (!cfg) return;
@@ -137,11 +141,12 @@ export class CustomSkinSystem extends System {
       }
     });
 
-    this._active = true;
+    this._active = this._sprites.length > 0;
     console.log(`[CustomSkin] ${this._sprites.length} sprites created`);
   }
 
   _createSprite(texture, cfg, canvas) {
+    texture.baseTexture.update();
     const sprite = new PIXI.Sprite(texture);
     // Pivot в центрі спрайта — обертається навколо центру
     sprite.anchor.set(0.5, 0.5);
@@ -152,9 +157,9 @@ export class CustomSkinSystem extends System {
     return sprite;
   }
 
-  _hideOriginalSlots(skeleton, parts) {
+  _hideOriginalSlots(skeleton, partIds) {
     // Ховаємо слоти тільки для тих частин що намальовані
-    Object.keys(parts).forEach(partId => {
+    partIds.forEach(partId => {
       const cfg = PART_MAP[partId];
       if (!cfg) return;
 
@@ -162,12 +167,7 @@ export class CustomSkinSystem extends System {
       slotsToHide.forEach(slotName => {
         const slot = skeleton.findSlot(slotName);
         if (slot) {
-          // alpha = 0 ховає слот але зберігає анімацію кістки
-          slot.color.a = this._hasContent(
-            // Перевіряємо чи є малюнок
-            { data: new Uint8Array([0,0,0,1]) } // завжди ховаємо якщо є в parts
-          ) ? 0 : 1;
-          // Простіший варіант — просто ховаємо
+          // alpha = 0 ховає слот але зберігає анімацію кістки.
           slot.color.a = 0;
           console.log(`[CustomSkin] Hidden slot: ${slotName}`);
         }
