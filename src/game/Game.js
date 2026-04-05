@@ -35,7 +35,7 @@ export class Game {
 
     const audioSystem = new AudioSystem();
     const inputSystem = new InputSystem();
-    const dragSystem  = new DragSystem(this._app);
+    const dragSystem  = new DragSystem(this._app, audioSystem);
     const petSystem   = new PetSystem(this._app, audioSystem);
     this._customSkin  = new CustomSkinSystem(this._app);
 

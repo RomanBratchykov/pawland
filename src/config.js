@@ -4,42 +4,13 @@
 // Всі константи в одному місці. Жодної логіки — тільки числа і рядки.
 // Якщо хочеш підкрутити гравітацію або швидкість — тільки тут.
 // ─────────────────────────────────────────────────────────────────
-// const meows = [
-//   new Audio('/assets/meow1.mp3'),
-//   new Audio('/assets/meow2.mp3'),
-//   new Audio('/assets/meow3.mp3'),
-//   new Audio('/assets/meow4.mp3'),
-//   new Audio('/assets/meow5.mp3'),
-//   new Audio('/assets/meow6.mp3'),
-//   new Audio('/assets/meow7.mp3'),
-// ];
-
-// const playMeow = () => {
-//   const sound = meows[Math.floor(Math.random() * meows.length)];
-//   sound.currentTime = 0; // rewind if already playing
-//   sound.volume = 0.7;
-//   sound.play().catch(() => {}); 
-// };
-// const purr = new Audio('/assets/purr.mp3');
-//   purr.loop   = true;
-//   purr.volume = CONFIG.PURR_VOLUME;
-//   const bgMusic = new Audio('/assets/bg.mp3');
-//   bgMusic.loop   = true;
-//   bgMusic.volume = 0.1;
-//   const startMusic = () => {
-//     bgMusic.play().catch(() => {});
-//     window.removeEventListener('keydown', startMusic);
-//     window.removeEventListener('pointerdown', startMusic);
-//   };
-//   window.addEventListener('keydown', startMusic);
-//   window.addEventListener('pointerdown', startMusic); 
 
 export const CONFIG = {
   // ── Canvas ────────────────────────────────────────────────────
   WIDTH:    800,
-  HEIGHT:   600,
+  HEIGHT:   500,
   BG_COLOR: 0x1a1a2e,
-  FLOOR_Y:  540,
+  FLOOR_Y:  440,
 
   // ── Cat movement ─────────────────────────────────────────────
   MOVE_SPEED:          3,
@@ -57,7 +28,7 @@ export const CONFIG = {
   BALL_BOUNCE:   0.65,   // скільки енергії лишається після відскоку
   BALL_FRICTION: 0.988,  // гальмування на підлозі
   BALL_GRAVITY:  0.55,
-  CAT_HIT_RADIUS: 45,    // радіус тіла кота для колізії з м'ячем
+  CAT_HIT_RADIUS: 30,    // радіус тіла кота для колізії з м'ячем
 
   // ── Petting ───────────────────────────────────────────────────
   PET_THRESHOLD:   4,    // рухів миші = одне погладжування

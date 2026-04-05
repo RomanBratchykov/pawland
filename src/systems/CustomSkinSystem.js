@@ -203,28 +203,21 @@ export class CustomSkinSystem extends System {
   //
   // Але ці координати в просторі скелета, а наш контейнер може
   // мати свою позицію. Тому ми рахуємо відносно container.
-  update() {
-    if (!this._active) return;
+update() {
+  if (!this._active) return;
 
-    for (const { sprite, bone, cfg } of this._sprites) {
-      // bone.worldX/Y — в локальних координатах Spine скелета
-      // Spine використовує Y-вісь вниз, PIXI теж — добре
-      const worldRot = bone.worldRotationX * (Math.PI / 180); // deg → rad
+  for (const { sprite, bone, cfg } of this._sprites) {
+    const s       = 0.5; // масштаб Spine instance
+    const worldRot = bone.worldRotationX * (Math.PI / 180);
+    const cosR    = Math.cos(worldRot);
+    const sinR    = Math.sin(worldRot);
 
-      // Позиція: беремо world позицію кістки
-      // і додаємо offset вздовж напрямку кістки
-      const cosR = Math.cos(worldRot);
-      const sinR = Math.sin(worldRot);
-
-      sprite.x        = bone.worldX + cosR * cfg.offsetX - sinR * cfg.offsetY;
-      sprite.y        = bone.worldY + sinR * cfg.offsetX + cosR * cfg.offsetY;
-      sprite.rotation = worldRot + cfg.baseRotation;
-
-      // Враховуємо flipX кота (якщо кіт дивиться вліво)
-      // container.scale.x буде від'ємним при flipX
-      // Sprite вже в container тому flipX застосовується автоматично
-    }
+    // bone.worldX/Y → множимо на s щоб перевести в координати container
+    sprite.x        = bone.worldX * s + (cosR * cfg.offsetX - sinR * cfg.offsetY);
+    sprite.y        = bone.worldY * s + (sinR * cfg.offsetX + cosR * cfg.offsetY);
+    sprite.rotation = worldRot + cfg.baseRotation;
   }
+}
 
   // Скинути до оригінального скіна
   reset(catEntity) {

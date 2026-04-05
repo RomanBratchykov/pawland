@@ -8,5 +8,17 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; overflow: hidden; background: #0f0f1a; }
+
+  .desktop-hud     { display: flex !important; }
+  .mobile-controls { display: none !important; }
+
+  @media (max-width: 768px), (pointer: coarse) {
+    .desktop-hud     { display: none !important; }
+    .mobile-controls { display: flex !important; }
+  }
+</style>
   </body>
 </html>

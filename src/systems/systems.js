@@ -251,32 +251,33 @@ export class ShakeSystem extends System {
 export class AudioSystem extends System {
   constructor() {
     super();
-    this._purr = new Audio('/assets/purr.mp3');
+    this._purr  = new Audio('/assets/purr.mp3');
     this._purr.loop   = true;
-    this._purr.volume = CONFIG.PURR_VOLUME;
-    this._purring     = false;
-  }
-
-  startPurr() {
-    if (this._purring) return;
-    this._purring = true;
-    this._purr.currentTime = 0;
-    this._purr.play().catch(() => {});
-    console.log('[AUDIO] Purr start');
-  }
-
-  stopPurr() {
-    if (!this._purring) return;
+    this._purr.volume = 0.4;
     this._purring = false;
-    this._purr.pause();
-    console.log('[AUDIO] Purr stop');
+
+    // Meows
+    this._meows = [1,2,3,4,5,6,7].map(n => `/assets/meow${n}.mp3`);
+
+    // Background music — стартує після першого дотику
+    this._bg = new Audio('/assets/bg.mp3');
+    this._bg.loop = true; this._bg.volume = 0.1;
+    const startBg = () => {
+      this._bg.play().catch(() => {});
+      window.removeEventListener('pointerdown', startBg);
+    };
+    window.addEventListener('pointerdown', startBg);
   }
 
-  update() {} // звук керується подіями, не tick
-
-  destroy() {
-    this._purr.pause();
+  playMeow() {
+    const src = this._meows[Math.floor(Math.random() * this._meows.length)];
+    Object.assign(new Audio(src), { volume: 0.7 }).play().catch(() => {});
   }
+
+  startPurr() {}
+  stopPurr()  {}
+  update() {}
+  destroy() { this._purr.pause(); this._bg.pause(); }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -313,14 +314,16 @@ export class RenderSystem extends System {
       spine.container.y = tf.y;
 
       // Scale (для flipX)
-      spine.instance.scale.x = tf.scaleX * Math.sign(spine.instance.scale.x || 1);
+      const SPINE_SCALE = 0.5;
+spine.instance.scale.x = SPINE_SCALE * Math.sign(tf.scaleX || 1);
+spine.instance.scale.y = SPINE_SCALE;
 
       // Нахил
       if (tilt) spine.container.rotation = tilt.angle;
 
       // Блокуємо drift root кістки від анімації walk
       const root = spine.instance.skeleton.getRootBone();
-      if (root) root.y = 0;
+      if (root) { root.y = 0; root.x = 0; }
     }
 
     // ── Circle entities (Ball) ────────────────────────────────────

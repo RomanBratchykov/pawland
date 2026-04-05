@@ -25,10 +25,12 @@ import { PhysicsComponent }   from '../entities/index.js';
 import { TiltComponent }      from '../entities/index.js';
 import { InputComponent }     from '../entities/index.js';
 import { SpineComponent }     from '../entities/index.js';
+import { CatComponent }     from '../entities/index.js';
 
 export class DragSystem extends System {
-  constructor(app) {
+  constructor(app, audioSystem = null) {
     super();
+    this._audio = audioSystem;
     this._app      = app;
     this._mouseX   = 0;
     this._mouseY   = 0;
@@ -77,6 +79,7 @@ export class DragSystem extends System {
     }
 
     console.log(`[DRAG] Started on ${entity.name}`);
+  if (entity.has(CatComponent)) this._audio?.playMeow();
   }
 
   update() {

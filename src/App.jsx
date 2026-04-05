@@ -86,7 +86,7 @@ const App = () => {
 
   return (
     <div style={styles.gameWrapper}>
-      <h1 style={styles.title}>Cat Game</h1>
+      <h1 style={styles.title}>Pawland demo</h1>
 
       <div style={styles.canvasWrapper}>
         <canvas ref={canvasRef} style={{ display: 'block', width: '100%' }} />
@@ -95,24 +95,24 @@ const App = () => {
       {/* Кнопки управління */}
       <div style={styles.controls}>
         <button onClick={handleBackToEditor} style={styles.btn}>
-          🎨 Змінити кота
+          Change kitten
         </button>
         <button
           onClick={() => gameRef.current?.resetSkin()}
           style={{ ...styles.btn, ...styles.btnSecondary }}
         >
-          🐱 Оригінальний скін
+          Test skin
         </button>
       </div>
 
       {/* Desktop HUD */}
       <div className="desktop-hud" style={styles.hud}>
         {[
-          { key: 'A / D',   hint: 'рух'         },
-          { key: 'W',       hint: 'стрибок'      },
-          { key: 'Ctrl',    hint: 'сісти/встати' },
-          { key: '🖱 drag',  hint: 'кинути'      },
-          { key: '🖱 сидить', hint: 'гладити'    },
+          { key: 'A / D',   hint: 'Move'         },
+          { key: 'W',       hint: 'Jump'      },
+          { key: 'Ctrl',    hint: 'Sit/Stand' },
+          { key: '🖱 drag',  hint: 'Throw'      },
+          { key: '🖱 while sitting', hint: 'Pet'    },
         ].map(({ key, hint }) => (
           <div key={key} style={styles.keyGroup}>
             <span style={styles.key}>{key}</span>
@@ -161,11 +161,11 @@ const styles = {
   controls:       { display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' },
   btn:            { padding: '8px 20px', background: 'rgba(100,100,255,0.15)', border: '1px solid rgba(100,100,255,0.4)', borderRadius: '8px', color: '#c0c0ff', cursor: 'pointer', fontSize: '0.85rem', fontFamily: '"Courier New", monospace' },
   btnSecondary:   { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(200,200,255,0.6)' },
-  hud:            { display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap', justifyContent: 'center' },
+  hud:            { alignItems: 'center', gap: '16px', flexWrap: 'wrap', justifyContent: 'center' },
   keyGroup:       { display: 'flex', alignItems: 'center', gap: '6px' },
   key:            { display: 'inline-block', padding: '4px 10px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', color: '#c0c0ff', fontSize: '0.8rem', fontWeight: 'bold' },
   hint:           { color: 'rgba(200,200,255,0.4)', fontSize: '0.75rem' },
-  mobileControls: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', width: '100%', maxWidth: '800px', padding: '0 16px 8px', boxSizing: 'border-box' },
+  mobileControls: { justifyContent: 'space-between', alignItems: 'flex-end', width: '100%', maxWidth: '800px', padding: '0 16px 8px', boxSizing: 'border-box' },
   dpad:           { display: 'flex', gap: '8px' },
   actions:        { display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end' },
   mBtn:           { width: '60px', height: '60px', borderRadius: '50%', background: 'rgba(255,255,255,0.1)', border: '2px solid rgba(255,255,255,0.25)', color: '#e0e0ff', fontSize: '1.3rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'none' },
