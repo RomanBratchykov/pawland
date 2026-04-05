@@ -76,6 +76,6 @@ export const CONFIG = {
     WALK:  'walk',
     SIT:   'sit',
     JUMP:  'jump_vertical',
-    PET:   'sit',
+    PET:   'sitpet',
   },
 };
