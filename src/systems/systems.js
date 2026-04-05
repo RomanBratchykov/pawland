@@ -257,7 +257,7 @@ export class AudioSystem extends System {
     this._purring = false;
 
     // Meows
-    this._meows = [1,2,3,4,5,6,7].map(n => `/assets/meow${n}.mp3`);
+    this._meows = [1,2].map(n => `/assets/meow${n}.mp3`);
 
     // Background music — стартує після першого дотику
     this._bg = new Audio('/assets/bg.mp3');

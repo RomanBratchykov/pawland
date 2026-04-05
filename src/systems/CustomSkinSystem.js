@@ -205,16 +205,20 @@ export class CustomSkinSystem extends System {
   // мати свою позицію. Тому ми рахуємо відносно container.
 update() {
   if (!this._active) return;
+  console.log('[CustomSkin] Updating sprite positions based on bone transforms');
 
   for (const { sprite, bone, cfg } of this._sprites) {
-    const s       = 0.5; // масштаб Spine instance
-    const worldRot = bone.worldRotationX * (Math.PI / 180);
-    const cosR    = Math.cos(worldRot);
-    const sinR    = Math.sin(worldRot);
+    // Беремо поворот. Якщо обертається не туди, змініть на -bone.worldRotationX
+    const worldRot = bone.worldRotationX * (Math.PI / 180); 
+    const cosR = Math.cos(worldRot);
+    const sinR = Math.sin(worldRot);
 
-    // bone.worldX/Y → множимо на s щоб перевести в координати container
-    sprite.x        = bone.worldX * s + (cosR * cfg.offsetX - sinR * cfg.offsetY);
-    sprite.y        = bone.worldY * s + (sinR * cfg.offsetX + cosR * cfg.offsetY);
+    // Використовуємо координати кістки напряму. 
+    // Spine-TS зазвичай віддає worldX/worldY відносно свого батьківського PIXI контейнера.
+    sprite.x = bone.worldX + (cosR * cfg.offsetX - sinR * cfg.offsetY);
+    sprite.y = bone.worldY + (sinR * cfg.offsetX + cosR * cfg.offsetY);
+    
+    // Додаємо базовий поворот (наприклад, 90 градусів для лап)
     sprite.rotation = worldRot + cfg.baseRotation;
   }
 }

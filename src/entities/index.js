@@ -178,6 +178,36 @@ export class HeartComponent extends Component {
 
 // ── Factories ─────────────────────────────────────────────────────
 // Створюють готові ECS entities для Game.js
+export const createBall = (app, dragSystem, x, y) => {
+  const ball = new Entity('ball')
+    .add(new BallComponent())
+    .add(new TransformComponent({ x, y }))
+    .add(new PhysicsComponent({
+      vx: -2,
+      vy: 0,
+      gravity: CONFIG.BALL_GRAVITY,
+      bounce: CONFIG.BALL_BOUNCE,
+      friction: CONFIG.BALL_FRICTION,
+    }))
+    .add(new ColliderComponent({ radius: CONFIG.BALL_RADIUS }))
+    .add(new RenderComponent({
+      type: 'circle',
+      color: CONFIG.BALL_COLOR,
+      radius: CONFIG.BALL_RADIUS,
+    }));
+
+  const render = ball.get(RenderComponent);
+  render.shadow = new PIXI.Graphics();
+  render.pixi = new PIXI.Graphics();
+  render.pixi.interactive = true;
+  render.pixi.cursor = 'grab';
+  render.pixi.hitArea = new PIXI.Circle(x, y, CONFIG.BALL_RADIUS * 1.5);
+  render.pixi.on('pointerdown', (e) => dragSystem?.startDrag(ball, e));
+
+  app.stage.addChild(render.shadow);
+  app.stage.addChild(render.pixi);
+  return ball;
+};
 
 export const createCat = (app, spineData, dragSystem, petSystem) => {
   const cat = new Entity('cat')
@@ -235,33 +265,4 @@ export const createCat = (app, spineData, dragSystem, petSystem) => {
   return cat;
 };
 
-export const createBall = (app, dragSystem, x, y) => {
-  const ball = new Entity('ball')
-    .add(new BallComponent())
-    .add(new TransformComponent({ x, y }))
-    .add(new PhysicsComponent({
-      vx: -2,
-      vy: 0,
-      gravity: CONFIG.BALL_GRAVITY,
-      bounce: CONFIG.BALL_BOUNCE,
-      friction: CONFIG.BALL_FRICTION,
-    }))
-    .add(new ColliderComponent({ radius: CONFIG.BALL_RADIUS }))
-    .add(new RenderComponent({
-      type: 'circle',
-      color: CONFIG.BALL_COLOR,
-      radius: CONFIG.BALL_RADIUS,
-    }));
 
-  const render = ball.get(RenderComponent);
-  render.shadow = new PIXI.Graphics();
-  render.pixi = new PIXI.Graphics();
-  render.pixi.interactive = true;
-  render.pixi.cursor = 'grab';
-  render.pixi.hitArea = new PIXI.Circle(x, y, CONFIG.BALL_RADIUS * 1.5);
-  render.pixi.on('pointerdown', (e) => dragSystem?.startDrag(ball, e));
-
-  app.stage.addChild(render.shadow);
-  app.stage.addChild(render.pixi);
-  return ball;
-};

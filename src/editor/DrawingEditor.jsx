@@ -10,32 +10,73 @@
 // ─────────────────────────────────────────────────────────────────
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { HexColorPicker } from 'react-colorful';
 
 // Частини тіла — відповідають кісткам і слотам в Spine
 // size: розмір canvas в пікселях для малювання
 // hint: підказка що малювати
 const PARTS = [
-  { id: 'head',  label: '😺 Голова', size: [200, 200], hint: 'Намалюй голову кота — круг, трикутні вуха, очі, ніс' },
-  { id: 'body',  label: '🐱 Тіло',   size: [180, 160], hint: 'Намалюй тіло — овал з хутром або візерунком' },
-  { id: 'leg',   label: '🦵 Лапка',  size: [80,  130], hint: 'Одна лапка — використається для всіх чотирьох' },
-  { id: 'tail',  label: '〰️ Хвіст', size: [80,  200], hint: 'Намалюй хвіст — знизу вгору' },
+  { id: 'head',  label: 'Head', size: [200, 200], hint: 'Draw the cat\'s head — a circle with triangular ears, eyes, and a nose' },
+  { id: 'body',  label: 'Body',   size: [180, 160], hint: 'Draw the body — an oval with fur or a pattern' },
+  { id: 'leg',   label: 'Leg',  size: [80,  130], hint: 'One leg — used for all four legs' },
+  { id: 'tail',  label: 'Tail', size: [80,  200], hint: 'Draw the tail — from bottom to top' },
 ];
 
-// Кольори палітри
-const PALETTE = [
-  '#1a1a2e', '#ffffff', '#ff6b9d', '#ffd93d',
-  '#6bcb77', '#4d96ff', '#c77dff', '#f4a261',
-  '#e76f51', '#8ecae6', '#a8dadc', '#457b9d',
-  '#brown', '#264653', '#2a9d8f', '#e9c46a',
-];
+// function PopoverColorPicker({ color, onChange }) {
+//   const [isOpen, setIsOpen] = useState(false);
 
-// Реальний brown замість рядка
-const FIXED_PALETTE = PALETTE.map(c => c === '#brown' ? '#8B6914' : c);
+//   return (
+//     <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+//       <button 
+//         onClick={() => setIsOpen(!isOpen)}
+//         style={{
+//           padding: '12px 24px',
+//           backgroundColor: color,
+//           color: '#ffffff',
+//           border: '2px solid #ffffff',
+//           borderRadius: '8px',
+//           cursor: 'pointer',
+//           fontWeight: 'bold',
+//           textShadow: '0px 1px 3px rgba(0,0,0,0.8)'
+//         }}
+//       >
+//         {isOpen ? 'Close Picker' : '🎨 Pick Color'}
+//       </button>
 
+//       {isOpen && (
+//         <div 
+//           style={{
+//             position: 'absolute',
+//             top: '55px', 
+//             left: '0',
+//             zIndex: 10,
+//             backgroundColor: '#2a2a3a',
+//             padding: '12px',
+//             borderRadius: '12px',
+//             boxShadow: '0px 8px 16px rgba(0,0,0,0.5)',
+//             border: '1px solid #4a4a5a'
+//           }}
+//         >
+//           <HexColorPicker color={color} onChange={onChange} />
+//           <button 
+//             onClick={() => setIsOpen(false)}
+//             style={{
+//               width: '100%', marginTop: '12px', padding: '8px',
+//               backgroundColor: '#4d96ff', color: 'white', border: 'none',
+//               borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold'
+//             }}
+//           >
+//             Done
+//           </button>
+//         </div>
+//       )}
+//     </div>
+//   );
+// }
 const DrawingEditor = ({ onComplete }) => {
   const [activePart, setActivePart]     = useState('head');
   const [tool, setTool]                 = useState('brush');  // brush | eraser | fill
-  const [color, setColor]               = useState('#8B6914');
+  const [color, setColor]               = useState('#000000');
   const [brushSize, setBrushSize]       = useState(8);
   const [isDrawing, setIsDrawing]       = useState(false);
   const [completedParts, setCompleted]  = useState(new Set());
@@ -254,7 +295,7 @@ const DrawingEditor = ({ onComplete }) => {
 
   return (
     <div style={s.wrapper}>
-      <h1 style={s.title}>🎨 Намалюй свого кота</h1>
+      <h1 style={s.title}>🎨 Draw your cat</h1>
 
       {/* Вибір частини тіла */}
       <div style={s.partSelector}>
@@ -298,7 +339,7 @@ const DrawingEditor = ({ onComplete }) => {
 
           {/* Розмір пензля */}
           <div style={s.toolGroup}>
-            <label style={s.label}>Розмір</label>
+            <label style={s.label}>Size</label>
             <input
               type="range" min="2" max="40" value={brushSize}
               onChange={e => setBrushSize(Number(e.target.value))}
@@ -308,7 +349,7 @@ const DrawingEditor = ({ onComplete }) => {
           </div>
 
           {/* Очистити */}
-          <button onClick={clearPart} style={s.clearBtn}>🗑 Очистити</button>
+          <button onClick={clearPart} style={s.clearBtn}>🗑 Clean</button>
         </div>
 
         {/* Canvas */}
@@ -333,23 +374,19 @@ const DrawingEditor = ({ onComplete }) => {
 
         {/* Палітра */}
         <div style={s.palette}>
-          {FIXED_PALETTE.map(c => (
-            <button
-              key={c}
-              onClick={() => { setColor(c); setTool('brush'); }}
-              style={{
-                ...s.colorBtn,
-                background: c,
-                boxShadow: color === c ? `0 0 0 3px white, 0 0 0 5px ${c}` : 'none',
-              }}
-            />
-          ))}
+          {/* <PopoverColorPicker 
+            color={color} 
+            onChange={(newColor) => {
+              setColor(newColor);
+              setTool('brush'); 
+            }} 
+          /> */}
           {/* Кастомний колір */}
           <input
             type="color" value={color}
             onChange={e => { setColor(e.target.value); setTool('brush'); }}
             style={s.colorInput}
-            title="Свій колір"
+            title="Your custom color"
           />
         </div>
 
@@ -360,11 +397,11 @@ const DrawingEditor = ({ onComplete }) => {
         onClick={handleComplete}
         style={s.doneBtn}
       >
-        🐱 Грати!
+        Play!
       </button>
       <p style={s.doneHint}>
-        Намальовано: {completedParts.size}/{PARTS.length} частин
-        {completedParts.size === 0 && ' — можна грати і з порожнім котом'}
+        Drew: {completedParts.size}/{PARTS.length} parts completed
+        {completedParts.size === 0 && ' — could be a good idea to start with the head!'}
       </p>
     </div>
   );
