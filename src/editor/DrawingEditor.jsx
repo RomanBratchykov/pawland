@@ -907,7 +907,7 @@ const s = {
     height: '100dvh',
     background: 'transparent',
     color: '#edf0ff',
-    fontFamily: '"Trebuchet MS", "Verdana", sans-serif',
+    fontFamily: '"purrabet-regular", sans-serif',
     padding: '20px',
     paddingBottom: '34px',
     boxSizing: 'border-box',

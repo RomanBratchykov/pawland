@@ -14,22 +14,33 @@ const SCREEN = {
   ERROR: 'error',
 };
 
-const ROOM_CHANNEL = `cat-room-${import.meta.env.VITE_DEFAULT_ROOM || 'main'}`;
+const CHAT_MAX_LENGTH = 120;
+
+const ROOM_NAME =
+  new URLSearchParams(window.location.search).get('room') ||
+  import.meta.env.VITE_DEFAULT_ROOM ||
+  'main';
+const ROOM_CHANNEL = `cat-room-${ROOM_NAME}`;
 
 const DECOR_IMAGES = ['/assets/heart.png', '/assets/star.png'];
+
+function seededUnit(index, seed) {
+  const value = Math.sin((index + 1) * 12.9898 + seed * 78.233) * 43758.5453;
+  return value - Math.floor(value);
+}
 
 function MovingDecorBackground() {
   const sprites = useMemo(() => {
     return Array.from({ length: 40 }, (_, index) => {
       const image = DECOR_IMAGES[index % DECOR_IMAGES.length];
-      const size = 16 + Math.floor(Math.random() * 20);
-      const opacity = 0.08 + Math.random() * 0.16;
-      const duration = 24 + Math.random() * 26;
-      const delay = -Math.random() * 56;
-      const startX = -12 + Math.random() * 118;
-      const startY = -12 + Math.random() * 118;
-      const driftX = 58 + Math.random() * 32;
-      const driftY = 58 + Math.random() * 32;
+      const size = 16 + Math.floor(seededUnit(index, 1) * 20);
+      const opacity = 0.08 + seededUnit(index, 2) * 0.16;
+      const duration = 24 + seededUnit(index, 3) * 26;
+      const delay = -seededUnit(index, 4) * 56;
+      const startX = -12 + seededUnit(index, 5) * 118;
+      const startY = -12 + seededUnit(index, 6) * 118;
+      const driftX = 58 + seededUnit(index, 7) * 32;
+      const driftY = 58 + seededUnit(index, 8) * 32;
 
       return {
         id: `decor-${index}`,
@@ -107,11 +118,14 @@ const App = () => {
   const [errorText, setErrorText] = useState('');
 
   const [onlinePlayers, setOnlinePlayers] = useState([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatText, setChatText] = useState('');
 
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
   const roomChannelRef = useRef(null);
   const localPresenceRef = useRef(null);
+  const chatInputRef = useRef(null);
 
   const withBackground = (content) => (
     <div className="app-bg-shell">
@@ -304,10 +318,6 @@ const App = () => {
 
     gameRef.current = game;
 
-    if (skinCanvases) {
-      game.applySkin(skinCanvases);
-    }
-
     return () => {
       game.destroy();
       if (gameRef.current === game) {
@@ -332,6 +342,73 @@ const App = () => {
   }, [remotePlayers]);
 
   useEffect(() => {
+    if (screen !== SCREEN.ROOM) {
+      setChatOpen(false);
+      setChatText('');
+      return undefined;
+    }
+
+    const onKeyDown = (event) => {
+      const key = String(event.key || '').toLowerCase();
+
+      if (key === 't') {
+        event.preventDefault();
+        setChatOpen((prev) => !prev);
+        return;
+      }
+
+      if (key === 'escape') {
+        setChatOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [screen]);
+
+  useEffect(() => {
+    if (!chatOpen) return;
+    chatInputRef.current?.focus();
+  }, [chatOpen]);
+
+  const sendChatMessage = useCallback(async (rawText) => {
+    if (!user) return;
+
+    const message = String(rawText || '').trim().slice(0, CHAT_MAX_LENGTH);
+    if (!message) return;
+
+    const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
+
+    gameRef.current?.setLocalChatBubble(message);
+
+    const channel = roomChannelRef.current;
+    if (!channel) return;
+
+    await channel.send({
+      type: 'broadcast',
+      event: 'chat',
+      payload: {
+        userId: user.id,
+        name: localName,
+        message,
+        sentAt: Date.now(),
+      },
+    });
+  }, [catRecord?.name, user]);
+
+  const handleChatSubmit = async (event) => {
+    event.preventDefault();
+
+    try {
+      await sendChatMessage(chatText);
+      setChatText('');
+      setChatOpen(false);
+    } catch (error) {
+      setErrorText(sanitizeError(error, 'Failed to send chat message.'));
+    }
+  };
+
+  useEffect(() => {
     if (!supabase || screen !== SCREEN.ROOM || !user) return undefined;
 
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
@@ -353,6 +430,15 @@ const App = () => {
     channel.on('presence', { event: 'sync' }, () => {
       const currentState = channel.presenceState();
       setOnlinePlayers(toPresencePlayers(currentState));
+    });
+
+    channel.on('broadcast', { event: 'chat' }, (event) => {
+      const payload = event?.payload || event || {};
+      const fromId = typeof payload.userId === 'string' ? payload.userId : null;
+      const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+
+      if (!fromId || !message || fromId === user.id) return;
+      gameRef.current?.setRemoteChatBubble(fromId, message);
     });
 
     channel.subscribe(async (status) => {
@@ -480,7 +566,7 @@ const App = () => {
     <div style={styles.roomWrapper}>
       <div style={styles.roomHeader}>
         <div>
-          <h1 style={styles.roomTitle}>Main Room</h1>
+          <h1 style={styles.roomTitle}>Room: {ROOM_NAME}</h1>
           <p style={styles.p}>
             You are {catRecord?.name || 'My Cat'} | Online: {onlinePlayers.length}
           </p>
@@ -507,7 +593,41 @@ const App = () => {
         <span style={styles.hint}>Jump</span>
         <span style={styles.key}>Ctrl</span>
         <span style={styles.hint}>Sit</span>
+        <span style={styles.key}>Ctrl + T</span>
+        <span style={styles.hint}>Chat</span>
       </div>
+
+      <div style={styles.chatRow}>
+        <button
+          type="button"
+          style={styles.secondaryBtn}
+          onClick={() => setChatOpen((prev) => !prev)}
+        >
+          {chatOpen ? 'Close chat' : 'Open chat'}
+        </button>
+        <span style={styles.chatHint}>Messages appear as speech bubbles above characters.</span>
+      </div>
+
+      {chatOpen ? (
+        <form style={styles.chatForm} onSubmit={handleChatSubmit}>
+          <input
+            ref={chatInputRef}
+            style={styles.chatInput}
+            type="text"
+            value={chatText}
+            maxLength={CHAT_MAX_LENGTH}
+            onChange={(event) => setChatText(event.target.value)}
+            placeholder="Say something..."
+          />
+          <button
+            type="submit"
+            style={styles.primaryBtn}
+            disabled={!chatText.trim()}
+          >
+            Send
+          </button>
+        </form>
+      ) : null}
 
       {remotePlayers.length > 0 ? (
         <div style={styles.onlineList}>
@@ -709,6 +829,37 @@ const styles = {
     borderRadius: 999,
     padding: '4px 10px',
     fontSize: 12,
+  },
+  chatRow: {
+    maxWidth: 980,
+    width: '100%',
+    margin: '0 auto',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  chatHint: {
+    fontSize: 12,
+    color: 'rgba(216, 237, 255, 0.72)',
+  },
+  chatForm: {
+    maxWidth: 980,
+    width: '100%',
+    margin: '0 auto',
+    display: 'grid',
+    gridTemplateColumns: '1fr auto',
+    gap: 8,
+  },
+  chatInput: {
+    width: '100%',
+    boxSizing: 'border-box',
+    border: '1px solid rgba(173, 215, 255, 0.35)',
+    borderRadius: 10,
+    padding: '10px 12px',
+    background: 'rgba(6, 16, 26, 0.9)',
+    color: '#dff6ff',
+    fontSize: 14,
   },
   editorTopBar: {
     width: '100%',

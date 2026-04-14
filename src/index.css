@@ -1,5 +1,11 @@
+@font-face {
+  font-family: 'purrabet-regular';
+  src: url('/assets/fonts/Purrabet-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+
 :root {
-  font-family: 'Trebuchet MS', Verdana, sans-serif;
+  font-family: 'purrabet-regular', sans-serif;
   line-height: 1.45;
   font-weight: 400;
   color: #e8eff7;
@@ -25,6 +31,14 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   background: #0f111d;
+  font-family: 'purrabet-regular', sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: 'purrabet-regular', sans-serif;
 }
 
 .app-bg-shell {

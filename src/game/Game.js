@@ -32,6 +32,9 @@ export class Game {
     this._emitStateClock = 0;
     this._remotePlayers = new Map();
     this._pendingRemotePlayers = [];
+    this._pendingRemoteBubbles = new Map();
+    this._chatBubbles = new Map();
+    this._chatTimers = new Map();
     this._skeletonData = null;
 
     this._app = new PIXI.Application({
@@ -131,6 +134,12 @@ export class Game {
       if (!entry) {
         entry = this._createRemotePlayer(player);
         this._remotePlayers.set(id, entry);
+
+        const queuedMessage = this._pendingRemoteBubbles.get(id);
+        if (queuedMessage) {
+          this.setRemoteChatBubble(id, queuedMessage);
+          this._pendingRemoteBubbles.delete(id);
+        }
       }
 
       this._updateRemotePlayer(entry, player);
@@ -138,9 +147,33 @@ export class Game {
 
     for (const [id, entry] of this._remotePlayers.entries()) {
       if (activeIds.has(id)) continue;
-      this._destroyRemotePlayer(entry);
+      this._destroyRemotePlayer(id, entry);
       this._remotePlayers.delete(id);
     }
+  }
+
+  setLocalChatBubble(text) {
+    if (!this._catEntity) return;
+
+    const spineComp = this._catEntity.get(SpineComponent);
+    if (!spineComp?.container) return;
+
+    this._setChatBubble('__local__', spineComp.container, text);
+  }
+
+  setRemoteChatBubble(userId, text) {
+    if (!userId) return;
+
+    const cleanText = String(text || '').trim().slice(0, 120);
+    if (!cleanText) return;
+
+    const entry = this._remotePlayers.get(userId);
+    if (!entry) {
+      this._pendingRemoteBubbles.set(userId, cleanText);
+      return;
+    }
+
+    this._setChatBubble(`remote:${userId}`, entry.container, cleanText);
   }
 
   addEntity(entity) { return this._world.addEntity(entity); }
@@ -176,7 +209,7 @@ export class Game {
 
     const label = new PIXI.Text(player?.name || 'Player', {
       fill: '#d9f4ff',
-      fontFamily: 'Verdana',
+      fontFamily: 'purrabet-regular',
       fontSize: 12,
       stroke: '#0b1626',
       strokeThickness: 3,
@@ -197,6 +230,76 @@ export class Game {
       lastX: Number.isFinite(player?.x) ? player.x : CONFIG.WIDTH / 2,
       lastY: Number.isFinite(player?.y) ? player.y : CONFIG.FLOOR_Y,
     };
+  }
+
+  _setChatBubble(key, parentContainer, text) {
+    const message = String(text || '').trim().slice(0, 120);
+    if (!message || !parentContainer) return;
+
+    this._clearChatBubble(key);
+
+    const bubble = this._createSpeechBubble(message);
+    parentContainer.sortableChildren = true;
+    bubble.zIndex = 999;
+    parentContainer.addChild(bubble);
+
+    this._chatBubbles.set(key, { bubble, parentContainer });
+
+    const timer = setTimeout(() => {
+      this._clearChatBubble(key);
+    }, 4800);
+    this._chatTimers.set(key, timer);
+  }
+
+  _clearChatBubble(key) {
+    const timer = this._chatTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this._chatTimers.delete(key);
+    }
+
+    const record = this._chatBubbles.get(key);
+    if (!record) return;
+
+    record.parentContainer?.removeChild(record.bubble);
+    record.bubble.destroy({ children: true, texture: false, baseTexture: false });
+    this._chatBubbles.delete(key);
+  }
+
+  _createSpeechBubble(message) {
+    const container = new PIXI.Container();
+
+    const text = new PIXI.Text(message, {
+      fontFamily: 'purrabet-regular',
+      fontSize: 12,
+      fill: '#12243e',
+      align: 'center',
+      wordWrap: true,
+      wordWrapWidth: 180,
+      lineHeight: 16,
+    });
+    text.anchor.set(0.5, 0);
+    text.x = 0;
+    text.y = 7;
+
+    const bubbleW = Math.max(56, Math.ceil(text.width + 20));
+    const bubbleH = Math.max(28, Math.ceil(text.height + 14));
+
+    const bg = new PIXI.Graphics();
+    bg.beginFill(0xffffff, 0.95);
+    bg.lineStyle(2, 0x2a456d, 0.9);
+    bg.drawRoundedRect(-bubbleW / 2, 0, bubbleW, bubbleH, 10);
+    bg.moveTo(-9, bubbleH - 1);
+    bg.lineTo(0, bubbleH + 11);
+    bg.lineTo(9, bubbleH - 1);
+    bg.lineTo(-9, bubbleH - 1);
+    bg.endFill();
+
+    container.addChild(bg);
+    container.addChild(text);
+    container.y = -236;
+
+    return container;
   }
 
   _updateRemotePlayer(entry, player) {
@@ -222,7 +325,8 @@ export class Game {
     entry.lastY = nextY;
   }
 
-  _destroyRemotePlayer(entry) {
+  _destroyRemotePlayer(id, entry) {
+    this._clearChatBubble(`remote:${id}`);
     entry.container.parent?.removeChild(entry.container);
     entry.container.destroy({ children: true, texture: false, baseTexture: false });
   }
@@ -242,8 +346,14 @@ export class Game {
   }
 
   destroy() {
-    for (const entry of this._remotePlayers.values()) {
-      this._destroyRemotePlayer(entry);
+    this._clearChatBubble('__local__');
+
+    for (const key of this._chatBubbles.keys()) {
+      this._clearChatBubble(key);
+    }
+
+    for (const [id, entry] of this._remotePlayers.entries()) {
+      this._destroyRemotePlayer(id, entry);
     }
     this._remotePlayers.clear();
 
