@@ -1,244 +1,268 @@
 // ─────────────────────────────────────────────────────────────────
-// CustomSkinSystem.js
+// CustomSkinSystem.js  — v3 (correct bone coordinate space)
 //
-// Накладає малюнки користувача на кістки Spine.
+// Ключове виправлення:
+//   Спрайти додаються до SPINE INSTANCE (не container).
+//   Spine instance має scale(0.5), тому bone.worldX/Y — у Spine units —
+//   використовуються безпосередньо без додаткового множення.
+//   Parent scale автоматично конвертує Spine units → screen pixels.
 //
-// Підхід: замість заміни Spine attachments (нестабільно між версіями)
-// ми:
-//   1. Ховаємо оригінальні слоти Spine
-//   2. Створюємо PIXI.Sprite для кожної частини тіла
-//   3. Кожен кадр синхронізуємо позицію/поворот спрайта з кісткою
-//
-// Чому це краще ніж замінювати attachment:
-//   - Не залежить від внутрішнього Spine API (яке мінялось між версіями)
-//   - Кожен спрайт незалежний — можна анімувати, масштабувати
-//   - Легко вимкнути/увімкнути для preview
-//   - Прозорість (alpha channel) малюнку зберігається
-//
-// Маппінг частин до кісток (назви з skeleton.json):
-//   head → bone 'head'
-//   body → bone 'body'
-//   leg  → bones 'leg1', 'leg2', 'leg3', 'leg4'
-//   tail → bone 'tail' (tail2 і tail3 теж рухаються але малюнок на tail)
+// Draw order відповідає skeleton.json:
+//   leg2(0), leg4(1), tail(2), body(3), leg3(4), head(5), leg1(6)
 // ─────────────────────────────────────────────────────────────────
 
 import * as PIXI from 'pixi.js';
 import { System }         from '../game/core/System.js';
 import { SpineComponent } from '../entities/index.js';
-import { CatComponent }   from '../entities/index.js';
+import { getFallbackSkeletonLayout, loadSkeletonLayout } from '../lib/skeletonLayout.js';
 
-// Маппінг: id частини → налаштування прив'язки до кістки
-const PART_MAP = {
-  head: {
-    boneName: 'head',
-    // Зміщення відносно кістки (підлаштуй якщо спрайт не там де треба)
-    offsetX:  0,
-    offsetY:  0,
-    // Базовий поворот (якщо малюнок намальований горизонтально)
-    baseRotation: 0,
-    // Масштаб відносно розміру кістки
-    scale: 0.6,
-    // Слоти Spine що треба приховати
-    hideSlots: ['head'],
-  },
-  body: {
-    boneName: 'body',
-    offsetX:  50,  // тіло зміщене вздовж кістки
-    offsetY:  0,
-    baseRotation: 0,
-    scale: 0.5,
-    hideSlots: ['body'],
-  },
-  leg: {
-    // Лапка використовується для всіх чотирьох кісток
-    boneNames: ['leg1', 'leg2', 'leg3', 'leg4'],
-    offsetX:   18,
-    offsetY:   0,
-    baseRotation: Math.PI / 2, // лапки намальовані вертикально
-    scale: 0.35,
-    hideSlots: ['leg', 'leg2', 'leg3', 'leg4'],
-  },
-  tail: {
-    boneName: 'tail',
-    offsetX:  30,
-    offsetY:  0,
-    baseRotation: 0,
-    scale: 0.4,
-    hideSlots: ['tail'],
-  },
+// Draw order з skeleton.json slots array
+const DRAW_ORDER = {
+  leg2: 0,
+  leg4: 1,
+  tail: 2,
+  body: 3,
+  leg3: 4,
+  head: 5,
+  leg1: 6,
 };
+
+function toAttachment(layoutItem) {
+  return {
+    x: layoutItem.x,
+    y: layoutItem.y,
+    rotation: layoutItem.rotation,
+    w: layoutItem.width,
+    h: layoutItem.height,
+  };
+}
+
+function buildPartMap(layout) {
+  const legAtt = toAttachment(layout.leg);
+
+  return {
+    head: {
+      boneName: 'head',
+      att: toAttachment(layout.head),
+      scale: 1,
+      rotationMode: 'bone',
+      hideSlots: ['head'],
+    },
+    body: {
+      boneName: 'body',
+      att: toAttachment(layout.body),
+      scale: 1,
+      rotationMode: 'bone',
+      hideSlots: ['body'],
+    },
+    leg: {
+      bones: [
+        { boneName: 'leg1', att: legAtt },
+        { boneName: 'leg2', att: legAtt },
+        { boneName: 'leg3', att: legAtt },
+        { boneName: 'leg4', att: legAtt },
+      ],
+      scale: 1,
+      rotationMode: 'bone',
+      hideSlots: ['leg', 'leg2', 'leg3', 'leg4'],
+    },
+    tail: {
+      boneName: 'tail',
+      att: toAttachment(layout.tail),
+      scale: 1,
+      rotationMode: 'bone',
+      hideSlots: ['tail'],
+    },
+  };
+}
 
 export class CustomSkinSystem extends System {
   constructor(app) {
     super();
-    this._app      = app;
-    this._sprites  = []; // масив { sprite, bone, cfg }
-    this._active   = false;
+    this._app     = app;
+    this._entries = [];
+    this._active  = false;
+    this._partMap = buildPartMap(getFallbackSkeletonLayout());
+    this._loadLayout();
   }
 
-  // Викликається з Game.js після завантаження малюнків
-  // parts: { head: HTMLCanvasElement, body: ..., leg: ..., tail: ... }
-  applyParts(catEntity, parts) {
-    console.log('[CustomSkin] Applying user drawings to cat skeleton');
+  async _loadLayout() {
+    const layout = await loadSkeletonLayout();
+    this._partMap = buildPartMap(layout);
+  }
 
-    const spine = catEntity.get(SpineComponent);
-    if (!spine?.instance) {
-      console.warn('[CustomSkin] No Spine instance found');
+  applyParts(catEntity, parts) {
+    const spineComp = catEntity.get(SpineComponent);
+    if (!spineComp?.instance) {
+      console.warn('[CustomSkin] No Spine instance');
       return;
     }
 
-    // Очищаємо попередні спрайти
     this._clearSprites();
 
-    const skeleton  = spine.instance.skeleton;
-    const container = spine.container;
+    const instance = spineComp.instance;
+    const skeleton = instance.skeleton;
 
-    // Працюємо тільки з реально намальованими частинами.
-    const drawableParts = Object.entries(parts).filter(([, canvas]) => this._hasContent(canvas));
+    instance.sortableChildren = true;
+    skeleton.slots.forEach(s => { s.color.a = 1; });
 
-    if (drawableParts.length === 0) {
-      this._active = false;
-      console.log('[CustomSkin] No non-empty parts to apply');
-      return;
-    }
+    const drawnParts = Object.entries(parts)
+      .filter(([, canvas]) => this._hasContent(canvas));
+
+    if (!drawnParts.length) { this._active = false; return; }
 
     // Ховаємо оригінальні слоти
-    this._hideOriginalSlots(skeleton, drawableParts.map(([partId]) => partId));
+    drawnParts.forEach(([partId]) => {
+      const cfg = this._partMap[partId];
+      if (!cfg) return;
+      (cfg.hideSlots || []).forEach(slotName => {
+        const slot = skeleton.findSlot(slotName);
+        if (slot) slot.color.a = 0;
+      });
+    });
 
-    // Для кожної намальованої частини створюємо спрайти
-    drawableParts.forEach(([partId, canvas]) => {
-
-      const cfg = PART_MAP[partId];
+    // Створюємо спрайти
+    drawnParts.forEach(([partId, canvas]) => {
+      const cfg = this._partMap[partId];
       if (!cfg) return;
 
-      // Конвертуємо canvas в PIXI.Texture
-      // canvas вже містить малюнок з прозорим фоном
-      const texture = PIXI.Texture.from(canvas);
-      console.log(`[CustomSkin] Created texture for '${partId}': ${canvas.width}×${canvas.height}`);
+      const trim = this._trim(canvas);
+      if (!trim) return;
 
-      if (cfg.boneNames) {
-        // Кілька кісток (лапки)
-        cfg.boneNames.forEach(boneName => {
-          const bone = skeleton.findBone(boneName);
-          if (!bone) {
-            console.warn(`[CustomSkin] Bone '${boneName}' not found`);
-            return;
-          }
-          const sprite = this._createSprite(texture, cfg, canvas);
-          container.addChild(sprite);
-          this._sprites.push({ sprite, bone, cfg, container });
+      const texture = PIXI.Texture.from(trim.canvas);
+      texture.baseTexture.update();
+
+      if (cfg.bones) {
+        cfg.bones.forEach(boneEntry => {
+          const bone = skeleton.findBone(boneEntry.boneName);
+          if (!bone) return;
+          const sprite = this._makeSprite(texture, cfg, trim, boneEntry.att);
+          sprite.zIndex = DRAW_ORDER[boneEntry.boneName] ?? 5;
+          instance.addChild(sprite);
+          this._entries.push({ sprite, bone, cfg, att: boneEntry.att });
         });
       } else {
-        // Одна кістка
         const bone = skeleton.findBone(cfg.boneName);
-        if (!bone) {
-          console.warn(`[CustomSkin] Bone '${cfg.boneName}' not found`);
-          return;
-        }
-        const sprite = this._createSprite(texture, cfg, canvas);
-        container.addChild(sprite);
-        this._sprites.push({ sprite, bone, cfg, container });
+        if (!bone) return;
+        const sprite = this._makeSprite(texture, cfg, trim, cfg.att);
+        sprite.zIndex = DRAW_ORDER[cfg.boneName] ?? 5;
+        instance.addChild(sprite);
+        this._entries.push({ sprite, bone, cfg, att: cfg.att });
       }
     });
 
-    this._active = this._sprites.length > 0;
-    console.log(`[CustomSkin] ${this._sprites.length} sprites created`);
+    this._active = this._entries.length > 0;
+    console.log(`[CustomSkin] ${this._entries.length} sprites`);
   }
 
-  _createSprite(texture, cfg, canvas) {
-    texture.baseTexture.update();
+  reset(catEntity) {
+    this._clearSprites();
+    this._active = false;
+    const spineComp = catEntity.get(SpineComponent);
+    if (spineComp?.instance) {
+      spineComp.instance.skeleton.slots.forEach(s => { s.color.a = 1; });
+    }
+  }
+
+  update() {
+    if (!this._active) return;
+
+    for (const { sprite, bone, cfg, att } of this._entries) {
+      // bone.a/b/c/d — transform матриця кістки (включає rotate + scale)
+      // Вона трансформує attachment offset з bone-local в Spine world coords
+      const a = bone.a ?? 1, b = bone.b ?? 0;
+      const c = bone.c ?? 0, d = bone.d ?? 1;
+
+      // Позиція = bone origin + attachment offset в world space
+      // Все в Spine units — parent scale(0.5) конвертує в пікселі
+      sprite.x = bone.worldX + att.x * a + att.y * b;
+      sprite.y = bone.worldY + att.x * c + att.y * d;
+
+      // Поворот кістки в градусах
+      const boneRotDeg = Number.isFinite(bone.worldRotationX)
+        ? bone.worldRotationX
+        : Math.atan2(c, a) * (180 / Math.PI);
+
+      const attRotRad = att.rotation * (Math.PI / 180);
+
+      if (cfg.rotationMode === 'upright') {
+        sprite.rotation = attRotRad;
+      } else {
+        sprite.rotation = boneRotDeg * (Math.PI / 180) + attRotRad;
+      }
+
+      sprite.visible = Number.isFinite(sprite.x) && Number.isFinite(sprite.y);
+    }
+  }
+
+  _makeSprite(texture, cfg, trim, att) {
     const sprite = new PIXI.Sprite(texture);
-    // Pivot в центрі спрайта — обертається навколо центру
-    sprite.anchor.set(0.5, 0.5);
-    // Масштаб відповідно до налаштувань частини
-    const scaleX = (canvas.width  * cfg.scale) / canvas.width;
-    const scaleY = (canvas.height * cfg.scale) / canvas.height;
-    sprite.scale.set(scaleX, scaleY);
+
+    // Anchor: центр оригінального canvas в координатах обрізаного canvas
+    const srcW = trim.sourceW;
+    const srcH = trim.sourceH;
+    sprite.anchor.set(
+      Math.max(0, Math.min(1, (srcW / 2 - trim.minX) / trim.w)),
+      Math.max(0, Math.min(1, (srcH / 2 - trim.minY) / trim.h)),
+    );
+
+    // Scale: attachment size (Spine units) / source canvas size (px)
+    // Тому що parent має scale(0.5):
+    //   screen px = (canvas px) * sprite.scale * 0.5
+    //             = canvas px * (att.w / srcW) * 0.5
+    //             = att.w * 0.5 screen px per Spine unit ✓
+    const sx = (att.w / srcW) * (cfg.scale ?? 1);
+    const sy = (att.h / srcH) * (cfg.scale ?? 1);
+    sprite.scale.set(
+      Math.min(8, Math.max(0.01, sx)),
+      Math.min(8, Math.max(0.01, sy)),
+    );
+
     return sprite;
   }
 
-  _hideOriginalSlots(skeleton, partIds) {
-    // Ховаємо слоти тільки для тих частин що намальовані
-    partIds.forEach(partId => {
-      const cfg = PART_MAP[partId];
-      if (!cfg) return;
+  _trim(canvas) {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const { width: W, height: H } = canvas;
+    const data = ctx.getImageData(0, 0, W, H).data;
 
-      const slotsToHide = cfg.hideSlots || [];
-      slotsToHide.forEach(slotName => {
-        const slot = skeleton.findSlot(slotName);
-        if (slot) {
-          // alpha = 0 ховає слот але зберігає анімацію кістки.
-          slot.color.a = 0;
-          console.log(`[CustomSkin] Hidden slot: ${slotName}`);
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (data[(y * W + x) * 4 + 3] > 0) {
+          if (x < x0) x0 = x;  if (y < y0) y0 = y;
+          if (x > x1) x1 = x;  if (y > y1) y1 = y;
         }
-      });
-    });
+      }
+    }
+    if (x1 < x0) return null;
+
+    const p = 2;
+    x0 = Math.max(0, x0 - p); y0 = Math.max(0, y0 - p);
+    x1 = Math.min(W - 1, x1 + p); y1 = Math.min(H - 1, y1 + p);
+
+    const tw = x1 - x0 + 1, th = y1 - y0 + 1;
+    const out = document.createElement('canvas');
+    out.width = tw; out.height = th;
+    out.getContext('2d').drawImage(canvas, x0, y0, tw, th, 0, 0, tw, th);
+    return { canvas: out, minX: x0, minY: y0, w: tw, h: th, sourceW: W, sourceH: H };
   }
 
   _hasContent(canvas) {
     try {
-      const ctx  = canvas.getContext('2d');
-      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-      return data.some((v, i) => i % 4 === 3 && v > 0);
-    } catch {
-      return false;
-    }
+      const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      return d.some((v, i) => i % 4 === 3 && v > 0);
+    } catch { return false; }
   }
 
   _clearSprites() {
-    this._sprites.forEach(({ sprite, container }) => {
-      container?.removeChild(sprite);
+    this._entries.forEach(({ sprite }) => {
+      sprite.parent?.removeChild(sprite);
       sprite.destroy();
     });
-    this._sprites = [];
+    this._entries = [];
   }
 
-  // ── update: синхронізуємо спрайти з кістками ──────────────────────
-  // Це серце системи. Кожен кадр ми читаємо world transform кістки
-  // і застосовуємо до спрайту.
-  //
-  // bone.worldX/Y — позиція кістки в world координатах
-  // bone.worldRotationX — поворот в градусах
-  // bone.worldScaleX/Y — масштаб (якщо кістка масштабована анімацією)
-  //
-  // Але ці координати в просторі скелета, а наш контейнер може
-  // мати свою позицію. Тому ми рахуємо відносно container.
-update() {
-  if (!this._active) return;
-  console.log('[CustomSkin] Updating sprite positions based on bone transforms');
-
-  for (const { sprite, bone, cfg } of this._sprites) {
-    // Беремо поворот. Якщо обертається не туди, змініть на -bone.worldRotationX
-    const worldRot = bone.worldRotationX * (Math.PI / 180); 
-    const cosR = Math.cos(worldRot);
-    const sinR = Math.sin(worldRot);
-
-    // Використовуємо координати кістки напряму. 
-    // Spine-TS зазвичай віддає worldX/worldY відносно свого батьківського PIXI контейнера.
-    sprite.x = bone.worldX + (cosR * cfg.offsetX - sinR * cfg.offsetY);
-    sprite.y = bone.worldY + (sinR * cfg.offsetX + cosR * cfg.offsetY);
-    
-    // Додаємо базовий поворот (наприклад, 90 градусів для лап)
-    sprite.rotation = worldRot + cfg.baseRotation;
-  }
-}
-
-  // Скинути до оригінального скіна
-  reset(catEntity) {
-    this._clearSprites();
-    this._active = false;
-
-    const spine = catEntity.get(SpineComponent);
-    if (!spine?.instance) return;
-
-    // Відновлюємо слоти
-    spine.instance.skeleton.slots.forEach(slot => {
-      slot.color.a = 1;
-    });
-    console.log('[CustomSkin] Reset to original skin');
-  }
-
-  destroy() {
-    this._clearSprites();
-  }
+  destroy() { this._clearSprites(); }
 }

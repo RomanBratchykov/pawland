@@ -1,4 +1,5 @@
 import * as PIXI from 'pixi.js';
+import { Spine } from 'pixi-spine';
 import { World }  from './core/World.js';
 import { CONFIG } from '../config.js';
 
@@ -13,11 +14,25 @@ import {
   CollisionSystem, PetSystem, HeartSystem,
   ShakeSystem, AudioSystem, RenderSystem,
 } from '../systems/systems.js';
-import { createCat, createBall } from '../entities/index.js';
+import {
+  createCat,
+  createBall,
+  InputComponent,
+  TransformComponent,
+} from '../entities/index.js';
 
 export class Game {
-  constructor(canvas) {
+  constructor(canvas, options = {}) {
     console.log('[Game] Initializing...');
+
+    this._onLocalState = typeof options.onLocalState === 'function'
+      ? options.onLocalState
+      : null;
+    this._emitStateEveryMs = 120;
+    this._emitStateClock = 0;
+    this._remotePlayers = new Map();
+    this._pendingRemotePlayers = [];
+    this._skeletonData = null;
 
     this._app = new PIXI.Application({
       width:           CONFIG.WIDTH,
@@ -58,19 +73,28 @@ export class Game {
     this._app.loader
       .add('skeleton', '/assets/skeleton.json')
       .load((_, resources) => {
-        this._catEntity = createCat(this._app, resources.skeleton.spineData, dragSystem, petSystem);
+        this._skeletonData = resources.skeleton.spineData;
+        this._catEntity = createCat(this._app, this._skeletonData, dragSystem, petSystem);
         this._world.addEntity(this._catEntity);
 
         const ball = createBall(this._app, dragSystem, CONFIG.WIDTH * 0.7, CONFIG.FLOOR_Y - 20);
         this._world.addEntity(ball);
 
-        this._app.ticker.add(delta => this._world.tick(delta));
+        this._app.ticker.add((delta) => {
+          this._world.tick(delta);
+          this._tickLocalState();
+        });
         console.log('[Game] Ready!');
 
         // Застосовуємо відкладений скін якщо є
         if (this._pendingSkin) {
           this._customSkin.applyParts(this._catEntity, this._pendingSkin);
           this._pendingSkin = null;
+        }
+
+        if (this._pendingRemotePlayers.length > 0) {
+          this.setRemotePlayers(this._pendingRemotePlayers);
+          this._pendingRemotePlayers = [];
         }
       });
   }
@@ -88,7 +112,120 @@ export class Game {
     if (this._catEntity) this._customSkin.reset(this._catEntity);
   }
 
+  setRemotePlayers(players = []) {
+    if (!this._skeletonData) {
+      this._pendingRemotePlayers = players;
+      return;
+    }
+
+    const incoming = Array.isArray(players) ? players : [];
+    const activeIds = new Set();
+
+    incoming.forEach((player) => {
+      const id = player?.userId || player?.id;
+      if (!id) return;
+
+      activeIds.add(id);
+
+      let entry = this._remotePlayers.get(id);
+      if (!entry) {
+        entry = this._createRemotePlayer(player);
+        this._remotePlayers.set(id, entry);
+      }
+
+      this._updateRemotePlayer(entry, player);
+    });
+
+    for (const [id, entry] of this._remotePlayers.entries()) {
+      if (activeIds.has(id)) continue;
+      this._destroyRemotePlayer(entry);
+      this._remotePlayers.delete(id);
+    }
+  }
+
   addEntity(entity) { return this._world.addEntity(entity); }
+
+  _tickLocalState() {
+    if (!this._onLocalState || !this._catEntity) return;
+
+    this._emitStateClock += this._app.ticker.elapsedMS;
+    if (this._emitStateClock < this._emitStateEveryMs) return;
+
+    this._emitStateClock = 0;
+
+    const tf = this._catEntity.get(TransformComponent);
+    const input = this._catEntity.get(InputComponent);
+    if (!tf) return;
+
+    this._onLocalState({
+      x: Number(tf.x.toFixed(2)),
+      y: Number(tf.y.toFixed(2)),
+      facingRight: input?.facingRight !== false,
+    });
+  }
+
+  _createRemotePlayer(player) {
+    const container = new PIXI.Container();
+    const spine = new Spine(this._skeletonData);
+    const baseScale = 0.5;
+
+    spine.scale.set(baseScale);
+    spine.interactive = false;
+    spine.interactiveChildren = false;
+    spine.state.setAnimation(0, CONFIG.ANIM.STAND, true);
+
+    const label = new PIXI.Text(player?.name || 'Player', {
+      fill: '#d9f4ff',
+      fontFamily: 'Verdana',
+      fontSize: 12,
+      stroke: '#0b1626',
+      strokeThickness: 3,
+    });
+    label.anchor.set(0.5, 1);
+    label.y = -170;
+
+    container.addChild(spine);
+    container.addChild(label);
+    this._app.stage.addChild(container);
+
+    return {
+      container,
+      spine,
+      label,
+      baseScale,
+      currentAnim: CONFIG.ANIM.STAND,
+      lastX: Number.isFinite(player?.x) ? player.x : CONFIG.WIDTH / 2,
+      lastY: Number.isFinite(player?.y) ? player.y : CONFIG.FLOOR_Y,
+    };
+  }
+
+  _updateRemotePlayer(entry, player) {
+    const nextX = Number.isFinite(player?.x) ? player.x : entry.lastX;
+    const nextY = Number.isFinite(player?.y) ? player.y : entry.lastY;
+    const facingRight = player?.facingRight !== false;
+
+    const moved = Math.abs(nextX - entry.lastX) > 0.6 || Math.abs(nextY - entry.lastY) > 0.6;
+    const wantedAnim = moved ? CONFIG.ANIM.WALK : CONFIG.ANIM.STAND;
+
+    if (entry.currentAnim !== wantedAnim) {
+      entry.spine.state.setAnimation(0, wantedAnim, true);
+      entry.currentAnim = wantedAnim;
+    }
+
+    entry.container.x = nextX;
+    entry.container.y = nextY;
+    entry.spine.scale.x = entry.baseScale * (facingRight ? 1 : -1);
+    entry.spine.scale.y = entry.baseScale;
+    entry.label.text = player?.name || 'Player';
+
+    entry.lastX = nextX;
+    entry.lastY = nextY;
+  }
+
+  _destroyRemotePlayer(entry) {
+    entry.container.parent?.removeChild(entry.container);
+    entry.container.destroy({ children: true, texture: false, baseTexture: false });
+  }
 
   _drawBackground() {
     const bg = new PIXI.Graphics();
@@ -105,6 +242,11 @@ export class Game {
   }
 
   destroy() {
+    for (const entry of this._remotePlayers.values()) {
+      this._destroyRemotePlayer(entry);
+    }
+    this._remotePlayers.clear();
+
     this._world.destroy();
     this._app.destroy(true, { children: true, texture: true });
   }

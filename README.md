@@ -1,16 +1,65 @@
-# React + Vite
+# Cat Game
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Cat character creator + Spine-based room game with:
 
-Currently, two official plugins are available:
+- registration/login (Supabase Auth)
+- saved cat per user in PostgreSQL (Supabase DB)
+- online room presence (Supabase Realtime)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Stack
 
-## React Compiler
+- React + Vite
+- PixiJS + pixi-spine
+- Supabase (`@supabase/supabase-js`)
+- PostgreSQL (managed by Supabase)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 1) Install
 
-## Expanding the ESLint configuration
+```bash
+npm install
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## 2) Configure environment
+
+Create `.env` (or copy `.env.example`) and set:
+
+```env
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
+VITE_DEFAULT_ROOM=main
+```
+
+## 3) Create backend schema
+
+Run SQL scripts in Supabase SQL Editor:
+
+1. `backend/sql/001_schema.sql`
+2. `backend/sql/002_realtime.sql`
+
+Extra details are in `backend/README.md`.
+
+## 4) Run locally
+
+```bash
+npm run dev
+```
+
+Flow:
+
+1. register/login
+2. create cat in character creator
+3. save and enter room
+4. players in same room can see each other in realtime
+
+## 5) Production build
+
+```bash
+npm run build
+npm run preview
+```
+
+## Notes
+
+- Character creator supports uploaded part images and stores selected/generated skin parts.
+- Spine part placement is driven from `public/assets/skeleton.json` attachment layout with fallback values.
+- Realtime room currently uses a shared channel (`cat-room-main`).

@@ -1,585 +1,1189 @@
-// ─────────────────────────────────────────────────────────────────
-// DrawingEditor.jsx
-//
-// Повний редактор малювання частин тіла кота.
-// Кожна частина малюється на окремому прихованому canvas.
-// Коли гравець готовий — onComplete(parts) повертає Map<partName, HTMLCanvasElement>.
-//
-// Архітектурне рішення: тримаємо окремий canvas для кожної частини,
-// а не один. Це дозволяє редагувати будь-яку частину незалежно.
-// ─────────────────────────────────────────────────────────────────
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { HexColorPicker } from 'react-colorful';
+const PART_SIZES = {
+  head: [200, 200],
+  body: [180, 160],
+  leg: [80, 130],
+  tail: [80, 200],
+};
 
-// Частини тіла — відповідають кісткам і слотам в Spine
-// size: розмір canvas в пікселях для малювання
-// hint: підказка що малювати
-const PARTS = [
-  { id: 'head',  label: 'Head', size: [200, 200], hint: 'Draw the cat\'s head — a circle with triangular ears, eyes, and a nose' },
-  { id: 'body',  label: 'Body',   size: [180, 160], hint: 'Draw the body — an oval with fur or a pattern' },
-  { id: 'leg',   label: 'Leg',  size: [80,  130], hint: 'One leg — used for all four legs' },
-  { id: 'tail',  label: 'Tail', size: [80,  200], hint: 'Draw the tail — from bottom to top' },
+const PART_KEYS = ['head', 'body', 'leg', 'tail'];
+
+const PART_LABELS = {
+  head: 'Head',
+  body: 'Body',
+  leg: 'Paws',
+  tail: 'Tail',
+};
+
+const FUR_PRESETS = [
+  {
+    name: 'Ginger',
+    fur: '#d89b55',
+    belly: '#f7e8cc',
+    pattern: '#9b6231',
+    eye: '#58b7ff',
+    ear: '#f9b5bf',
+  },
+  {
+    name: 'Smoky',
+    fur: '#8b8c98',
+    belly: '#d8dbe3',
+    pattern: '#5f6471',
+    eye: '#8af0d8',
+    ear: '#ffc5d0',
+  },
+  {
+    name: 'Midnight',
+    fur: '#2e3342',
+    belly: '#6f7686',
+    pattern: '#1c2230',
+    eye: '#d5ff7a',
+    ear: '#ff8ea9',
+  },
+  {
+    name: 'Latte',
+    fur: '#c9ae8b',
+    belly: '#f4e8d8',
+    pattern: '#9f7f59',
+    eye: '#6fddff',
+    ear: '#f4b0b8',
+  },
 ];
 
-// function PopoverColorPicker({ color, onChange }) {
-//   const [isOpen, setIsOpen] = useState(false);
+const PATTERN_OPTIONS = [
+  { value: 'none', label: 'None' },
+  { value: 'stripes', label: 'Stripes' },
+  { value: 'spots', label: 'Spots' },
+];
 
-//   return (
-//     <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-//       <button 
-//         onClick={() => setIsOpen(!isOpen)}
-//         style={{
-//           padding: '12px 24px',
-//           backgroundColor: color,
-//           color: '#ffffff',
-//           border: '2px solid #ffffff',
-//           borderRadius: '8px',
-//           cursor: 'pointer',
-//           fontWeight: 'bold',
-//           textShadow: '0px 1px 3px rgba(0,0,0,0.8)'
-//         }}
-//       >
-//         {isOpen ? 'Close Picker' : '🎨 Pick Color'}
-//       </button>
+const EYE_OPTIONS = [
+  { value: 'round', label: 'Round' },
+  { value: 'sleepy', label: 'Sleepy' },
+  { value: 'big', label: 'Big' },
+];
 
-//       {isOpen && (
-//         <div 
-//           style={{
-//             position: 'absolute',
-//             top: '55px', 
-//             left: '0',
-//             zIndex: 10,
-//             backgroundColor: '#2a2a3a',
-//             padding: '12px',
-//             borderRadius: '12px',
-//             boxShadow: '0px 8px 16px rgba(0,0,0,0.5)',
-//             border: '1px solid #4a4a5a'
-//           }}
-//         >
-//           <HexColorPicker color={color} onChange={onChange} />
-//           <button 
-//             onClick={() => setIsOpen(false)}
-//             style={{
-//               width: '100%', marginTop: '12px', padding: '8px',
-//               backgroundColor: '#4d96ff', color: 'white', border: 'none',
-//               borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold'
-//             }}
-//           >
-//             Done
-//           </button>
-//         </div>
-//       )}
-//     </div>
-//   );
-// }
-const DrawingEditor = ({ onComplete }) => {
-  const [activePart, setActivePart]     = useState('head');
-  const [tool, setTool]                 = useState('brush');  // brush | eraser | fill
-  const [color, setColor]               = useState('#000000');
-  const [brushSize, setBrushSize]       = useState(8);
-  const [isDrawing, setIsDrawing]       = useState(false);
-  const [completedParts, setCompleted]  = useState(new Set());
+const DEFAULT_KITTEN = {
+  name: 'Mochi',
+  furColor: FUR_PRESETS[0].fur,
+  bellyColor: FUR_PRESETS[0].belly,
+  patternColor: FUR_PRESETS[0].pattern,
+  eyeColor: FUR_PRESETS[0].eye,
+  earColor: FUR_PRESETS[0].ear,
+  patternType: 'stripes',
+  eyeStyle: 'round',
+  hasSocks: true,
+  hasTailTip: true,
+};
 
-  // Тримаємо окремий canvas ref для кожної частини
-//   const canvasRefs  = useRef({});
-  const ctxRefs     = useRef({});
-  const canvasEls   = useRef({}); // offscreen canvases (зберігають малюнки)
-  const displayRef  = useRef(null); // canvas що показується
-  const lastPos     = useRef(null);
+const STORAGE_KEY_KITTEN = 'catGame.kittenBuilder.v1';
+const STORAGE_KEY_PART_LIBRARY = 'catGame.kittenPartLibrary.v1';
+const STORAGE_KEY_SELECTED_PARTS = 'catGame.kittenSelectedParts.v1';
 
-  // Ініціалізуємо offscreen canvas для кожної частини
-  useEffect(() => {
-    PARTS.forEach(part => {
-      if (!canvasEls.current[part.id]) {
-        const c  = document.createElement('canvas');
-        c.width  = part.size[0];
-        c.height = part.size[1];
-        const ctx = c.getContext('2d');
-        // Прозорий фон — важливо для накладання на скелет
-        ctx.clearRect(0, 0, c.width, c.height);
-        canvasEls.current[part.id] = c;
-        ctxRefs.current[part.id]   = ctx;
-      }
+function createEmptyPartLibrary() {
+  return {
+    head: [],
+    body: [],
+    leg: [],
+    tail: [],
+  };
+}
+
+function createEmptySelectedParts() {
+  return {
+    head: null,
+    body: null,
+    leg: null,
+    tail: null,
+  };
+}
+
+function createPartId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `part-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createCanvas(width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read image file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function decodeImageToCanvas(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+
+    image.onload = () => {
+      const maxSide = 512;
+      const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
+      const targetW = Math.max(1, Math.round(image.width * ratio));
+      const targetH = Math.max(1, Math.round(image.height * ratio));
+
+      const canvas = createCanvas(targetW, targetH);
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, targetW, targetH);
+      ctx.drawImage(image, 0, 0, targetW, targetH);
+      resolve(canvas);
+    };
+
+    image.onerror = () => reject(new Error('Image decode failed'));
+    image.src = dataUrl;
+  });
+}
+
+function hexToRgb(hex) {
+  const value = hex.replace('#', '');
+  return {
+    r: Number.parseInt(value.slice(0, 2), 16),
+    g: Number.parseInt(value.slice(2, 4), 16),
+    b: Number.parseInt(value.slice(4, 6), 16),
+  };
+}
+
+function shade(hex, amount) {
+  const rgb = hexToRgb(hex);
+  const clamp = (n) => Math.max(0, Math.min(255, n));
+  const r = clamp(rgb.r + amount);
+  const g = clamp(rgb.g + amount);
+  const b = clamp(rgb.b + amount);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function drawCheckerboard(ctx, w, h, tile = 10) {
+  for (let y = 0; y < h; y += tile) {
+    for (let x = 0; x < w; x += tile) {
+      ctx.fillStyle = ((x + y) / tile) % 2 === 0 ? '#d7d7d7' : '#bdbdbd';
+      ctx.fillRect(x, y, tile, tile);
+    }
+  }
+}
+
+function drawPattern(ctx, type, color, w, h, seed = 0) {
+  if (type === 'none') return;
+
+  if (type === 'stripes') {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 8;
+    ctx.globalAlpha = 0.45;
+    for (let i = -1; i < 7; i++) {
+      const x = (w / 6) * i + (seed % 2 ? 6 : 0);
+      ctx.beginPath();
+      ctx.moveTo(x, h * 0.15);
+      ctx.quadraticCurveTo(x + 16, h * 0.45, x - 12, h * 0.8);
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
+  if (type === 'spots') {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.38;
+    for (let i = 0; i < 7; i++) {
+      const rx = 10 + ((i * 29 + seed * 17) % (w - 20));
+      const ry = 12 + ((i * 21 + seed * 31) % (h - 24));
+      const rw = 7 + ((i * 7) % 14);
+      const rh = 6 + ((i * 9) % 13);
+      ctx.beginPath();
+      ctx.ellipse(rx, ry, rw, rh, (i * Math.PI) / 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function roundedRectPath(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function drawHeadPart(ctx, cfg) {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+
+  const outline = shade(cfg.furColor, -25);
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.fillStyle = cfg.furColor;
+  ctx.beginPath();
+  ctx.moveTo(54, 74);
+  ctx.lineTo(76, 30);
+  ctx.lineTo(104, 74);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(146, 74);
+  ctx.lineTo(124, 30);
+  ctx.lineTo(96, 74);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = cfg.earColor;
+  ctx.beginPath();
+  ctx.moveTo(67, 69);
+  ctx.lineTo(78, 45);
+  ctx.lineTo(93, 69);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(133, 69);
+  ctx.lineTo(122, 45);
+  ctx.lineTo(107, 69);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = cfg.furColor;
+  ctx.beginPath();
+  ctx.ellipse(100, 112, 67, 56, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(100, 112, 67, 56, 0, 0, Math.PI * 2);
+  ctx.clip();
+  drawPattern(ctx, cfg.patternType, cfg.patternColor, 130, 110, 2);
+  ctx.restore();
+
+  ctx.fillStyle = cfg.bellyColor;
+  ctx.beginPath();
+  ctx.ellipse(100, 128, 34, 22, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  const eyeY = cfg.eyeStyle === 'sleepy' ? 101 : 104;
+  const eyeRX = cfg.eyeStyle === 'big' ? 9 : 7;
+  const eyeRY = cfg.eyeStyle === 'sleepy' ? 3 : cfg.eyeStyle === 'big' ? 12 : 10;
+
+  ctx.fillStyle = '#151515';
+  ctx.beginPath();
+  ctx.ellipse(78, eyeY, eyeRX, eyeRY, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(122, eyeY, eyeRX, eyeRY, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = cfg.eyeColor;
+  const irisRY = cfg.eyeStyle === 'sleepy' ? 2 : eyeRY - 2;
+  ctx.beginPath();
+  ctx.ellipse(78, eyeY, Math.max(4, eyeRX - 2), Math.max(1.5, irisRY), 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(122, eyeY, Math.max(4, eyeRX - 2), Math.max(1.5, irisRY), 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ff7d9f';
+  ctx.beginPath();
+  ctx.moveTo(100, 114);
+  ctx.lineTo(95, 120);
+  ctx.lineTo(105, 120);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.ellipse(100, 112, 67, 56, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawBodyPart(ctx, cfg) {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.fillStyle = cfg.furColor;
+  ctx.beginPath();
+  ctx.ellipse(90, 82, 70, 62, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(90, 82, 70, 62, 0, 0, Math.PI * 2);
+  ctx.clip();
+  drawPattern(ctx, cfg.patternType, cfg.patternColor, 180, 160, 4);
+  ctx.restore();
+
+  ctx.fillStyle = cfg.bellyColor;
+  ctx.beginPath();
+  ctx.ellipse(95, 93, 40, 36, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = shade(cfg.furColor, -22);
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.ellipse(90, 82, 70, 62, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawLegPart(ctx, cfg) {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.fillStyle = cfg.furColor;
+  ctx.beginPath();
+  roundedRectPath(ctx, 18, 18, 44, 95, 18);
+  ctx.fill();
+
+  if (cfg.hasSocks) {
+    ctx.fillStyle = cfg.bellyColor;
+    ctx.beginPath();
+    roundedRectPath(ctx, 18, 78, 44, 35, 14);
+    ctx.fill();
+  }
+
+  if (cfg.patternType !== 'none') {
+    ctx.strokeStyle = cfg.patternColor;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(25, 34);
+    ctx.quadraticCurveTo(36, 48, 26, 63);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.strokeStyle = shade(cfg.furColor, -20);
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  roundedRectPath(ctx, 18, 18, 44, 95, 18);
+  ctx.stroke();
+}
+
+function drawTailPart(ctx, cfg) {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.strokeStyle = cfg.furColor;
+  ctx.lineWidth = 34;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(40, 184);
+  ctx.bezierCurveTo(27, 145, 18, 93, 43, 56);
+  ctx.stroke();
+
+  if (cfg.hasTailTip) {
+    ctx.strokeStyle = cfg.bellyColor;
+    ctx.lineWidth = 16;
+    ctx.beginPath();
+    ctx.moveTo(43, 64);
+    ctx.bezierCurveTo(39, 55, 36, 46, 44, 38);
+    ctx.stroke();
+  }
+
+  if (cfg.patternType !== 'none') {
+    ctx.strokeStyle = cfg.patternColor;
+    ctx.globalAlpha = 0.35;
+    ctx.lineWidth = 8;
+    for (let y = 170; y >= 84; y -= 26) {
+      ctx.beginPath();
+      ctx.moveTo(30, y);
+      ctx.quadraticCurveTo(40, y - 5, 52, y - 16);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function buildKittenParts(config) {
+  const [headW, headH] = PART_SIZES.head;
+  const [bodyW, bodyH] = PART_SIZES.body;
+  const [legW, legH] = PART_SIZES.leg;
+  const [tailW, tailH] = PART_SIZES.tail;
+
+  const head = createCanvas(headW, headH);
+  const body = createCanvas(bodyW, bodyH);
+  const leg = createCanvas(legW, legH);
+  const tail = createCanvas(tailW, tailH);
+
+  drawHeadPart(head.getContext('2d'), config);
+  drawBodyPart(body.getContext('2d'), config);
+  drawLegPart(leg.getContext('2d'), config);
+  drawTailPart(tail.getContext('2d'), config);
+
+  return { head, body, leg, tail };
+}
+
+function loadInitialKitten(initialKitten = null) {
+  if (initialKitten) {
+    return {
+      ...DEFAULT_KITTEN,
+      ...initialKitten,
+    };
+  }
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_KITTEN);
+    if (!raw) return DEFAULT_KITTEN;
+    const data = JSON.parse(raw);
+    return {
+      ...DEFAULT_KITTEN,
+      ...data,
+    };
+  } catch {
+    return DEFAULT_KITTEN;
+  }
+}
+
+function loadInitialPartLibrary(initialPartLibrary = null) {
+  if (initialPartLibrary) {
+    const result = createEmptyPartLibrary();
+    PART_KEYS.forEach((partKey) => {
+      const list = Array.isArray(initialPartLibrary?.[partKey]) ? initialPartLibrary[partKey] : [];
+      result[partKey] = list
+        .filter((item) => item && typeof item.id === 'string' && typeof item.dataUrl === 'string')
+        .map((item) => ({
+          id: item.id,
+          name: typeof item.name === 'string' ? item.name : 'Custom part',
+          dataUrl: item.dataUrl,
+        }));
     });
-  }, []);
+    return result;
+  }
 
-  const drawCheckerboard = (ctx, w, h) => {
-    const size = 10;
-    for (let x = 0; x < w; x += size) {
-      for (let y = 0; y < h; y += size) {
-        ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? '#e0e0e0' : '#c0c0c0';
-        ctx.fillRect(x, y, size, size);
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PART_LIBRARY);
+    if (!raw) return createEmptyPartLibrary();
+
+    const parsed = JSON.parse(raw);
+    const result = createEmptyPartLibrary();
+
+    PART_KEYS.forEach((partKey) => {
+      const list = Array.isArray(parsed?.[partKey]) ? parsed[partKey] : [];
+      result[partKey] = list
+        .filter((item) => item && typeof item.id === 'string' && typeof item.dataUrl === 'string')
+        .map((item) => ({
+          id: item.id,
+          name: typeof item.name === 'string' ? item.name : 'Custom part',
+          dataUrl: item.dataUrl,
+        }));
+    });
+
+    return result;
+  } catch {
+    return createEmptyPartLibrary();
+  }
+}
+
+function loadInitialSelectedParts(initialSelectedParts = null) {
+  if (initialSelectedParts) {
+    return {
+      head: typeof initialSelectedParts?.head === 'string' ? initialSelectedParts.head : null,
+      body: typeof initialSelectedParts?.body === 'string' ? initialSelectedParts.body : null,
+      leg: typeof initialSelectedParts?.leg === 'string' ? initialSelectedParts.leg : null,
+      tail: typeof initialSelectedParts?.tail === 'string' ? initialSelectedParts.tail : null,
+    };
+  }
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_SELECTED_PARTS);
+    if (!raw) return createEmptySelectedParts();
+    const parsed = JSON.parse(raw);
+
+    return {
+      head: typeof parsed?.head === 'string' ? parsed.head : null,
+      body: typeof parsed?.body === 'string' ? parsed.body : null,
+      leg: typeof parsed?.leg === 'string' ? parsed.leg : null,
+      tail: typeof parsed?.tail === 'string' ? parsed.tail : null,
+    };
+  } catch {
+    return createEmptySelectedParts();
+  }
+}
+
+function randomFrom(list) {
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function CanvasPreview({ title, sourceCanvas, sourceLabel }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !sourceCanvas) return;
+    canvas.width = sourceCanvas.width;
+    canvas.height = sourceCanvas.height;
+    const ctx = canvas.getContext('2d');
+    drawCheckerboard(ctx, canvas.width, canvas.height, 10);
+    ctx.drawImage(sourceCanvas, 0, 0);
+  }, [sourceCanvas]);
+
+  return (
+    <div style={s.previewCard}>
+      <span style={s.previewTitle}>{title}</span>
+      <span style={s.previewSource}>{sourceLabel}</span>
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: Math.max(100, sourceCanvas.width * 0.75),
+          height: Math.max(100, sourceCanvas.height * 0.75),
+          imageRendering: 'pixelated',
+          borderRadius: 10,
+          border: '1px solid rgba(255,255,255,0.2)',
+        }}
+      />
+    </div>
+  );
+}
+
+const DrawingEditor = ({
+  onComplete,
+  initialKitten,
+  initialPartLibrary,
+  initialSelectedParts,
+  topBar,
+}) => {
+  const [kitten, setKitten] = useState(() => loadInitialKitten(initialKitten));
+  const [partLibrary, setPartLibrary] = useState(() => loadInitialPartLibrary(initialPartLibrary));
+  const [selectedParts, setSelectedParts] = useState(() => loadInitialSelectedParts(initialSelectedParts));
+  const [customPartCanvases, setCustomPartCanvases] = useState({});
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_KITTEN, JSON.stringify(kitten));
+  }, [kitten]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_PART_LIBRARY, JSON.stringify(partLibrary));
+  }, [partLibrary]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_SELECTED_PARTS, JSON.stringify(selectedParts));
+  }, [selectedParts]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const loadCustomCanvases = async () => {
+      const nextCanvases = {};
+
+      for (const partKey of PART_KEYS) {
+        const selectedId = selectedParts[partKey];
+        if (!selectedId) continue;
+
+        const entry = partLibrary[partKey]?.find((item) => item.id === selectedId);
+        if (!entry?.dataUrl) continue;
+
+        try {
+          nextCanvases[partKey] = await decodeImageToCanvas(entry.dataUrl);
+        } catch {
+          // Ignore broken images and keep generated part instead.
+        }
       }
+
+      if (!isCancelled) {
+        setCustomPartCanvases(nextCanvases);
+      }
+    };
+
+    loadCustomCanvases();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [partLibrary, selectedParts]);
+
+  const generatedParts = useMemo(() => buildKittenParts(kitten), [kitten]);
+
+  const parts = useMemo(() => {
+    return {
+      ...generatedParts,
+      ...customPartCanvases,
+    };
+  }, [generatedParts, customPartCanvases]);
+
+  const setField = (key, value) => {
+    setKitten((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const applyPreset = (preset) => {
+    setKitten((prev) => ({
+      ...prev,
+      furColor: preset.fur,
+      bellyColor: preset.belly,
+      patternColor: preset.pattern,
+      eyeColor: preset.eye,
+      earColor: preset.ear,
+    }));
+  };
+
+  const randomize = () => {
+    const preset = randomFrom(FUR_PRESETS);
+    setKitten((prev) => ({
+      ...prev,
+      furColor: preset.fur,
+      bellyColor: preset.belly,
+      patternColor: preset.pattern,
+      eyeColor: preset.eye,
+      earColor: preset.ear,
+      patternType: randomFrom(PATTERN_OPTIONS).value,
+      eyeStyle: randomFrom(EYE_OPTIONS).value,
+      hasSocks: Math.random() > 0.35,
+      hasTailTip: Math.random() > 0.35,
+    }));
+  };
+
+  const resetToDefault = () => {
+    setKitten(DEFAULT_KITTEN);
+  };
+
+  const uploadPart = async (partKey, file) => {
+    if (!file || !file.type.startsWith('image/')) return;
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const baseName = file.name.replace(/\.[^/.]+$/, '');
+
+      const newEntry = {
+        id: createPartId(),
+        name: baseName || 'Custom part',
+        dataUrl,
+      };
+
+      setPartLibrary((prev) => ({
+        ...prev,
+        [partKey]: [newEntry, ...(prev[partKey] || [])].slice(0, 20),
+      }));
+
+      setSelectedParts((prev) => ({
+        ...prev,
+        [partKey]: newEntry.id,
+      }));
+    } catch (error) {
+      console.warn('[Editor] Failed to upload part image', error);
     }
   };
 
-   const syncDisplay = useCallback(() => {
-    const display = displayRef.current;
-    if (!display) return;
-    const part     = PARTS.find(p => p.id === activePart);
-    display.width  = part.size[0];
-    display.height = part.size[1];
-    const dCtx = display.getContext('2d');
-    dCtx.clearRect(0, 0, display.width, display.height);
-    // Малюємо шахову підкладку (показує прозорість)
-    drawCheckerboard(dCtx, display.width, display.height);
-    // Копіюємо поточний малюнок
-    const src = canvasEls.current[activePart];
-    if (src) dCtx.drawImage(src, 0, 0);
-  }, [activePart]);
+  const choosePart = (partKey, partId) => {
+    setSelectedParts((prev) => ({
+      ...prev,
+      [partKey]: partId,
+    }));
+  };
 
-  
+  const removePart = (partKey, partId) => {
+    setPartLibrary((prev) => ({
+      ...prev,
+      [partKey]: (prev[partKey] || []).filter((item) => item.id !== partId),
+    }));
 
-  // Копіюємо offscreen canvas на display canvas при зміні частини
-  useEffect(() => {
-    syncDisplay();
-  }, [activePart, syncDisplay]);
-
-
-  // ── Drawing ──────────────────────────────────────────────────────
-
-  const getPos = useCallback((e) => {
-    const rect = displayRef.current.getBoundingClientRect();
-    const part = PARTS.find(p => p.id === activePart);
-    const scaleX = part.size[0] / rect.width;
-    const scaleY = part.size[1] / rect.height;
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    return {
-      x: (clientX - rect.left) * scaleX,
-      y: (clientY - rect.top)  * scaleY,
-    };
-  }, [activePart]);
-
-  const fillAt = useCallback((x, y) => {
-    const canvas = canvasEls.current[activePart];
-    const ctx    = ctxRefs.current[activePart];
-    const w = canvas.width, h = canvas.height;
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const data = imageData.data;
-
-    const px = Math.round(x), py = Math.round(y);
-    const idx = (py * w + px) * 4;
-
-    const targetR = data[idx], targetG = data[idx+1],
-          targetB = data[idx+2], targetA = data[idx+3];
-
-    const fillR = parseInt(color.slice(1,3), 16);
-    const fillG = parseInt(color.slice(3,5), 16);
-    const fillB = parseInt(color.slice(5,7), 16);
-
-    if (targetR === fillR && targetG === fillG && targetB === fillB) return;
-
-    const match = (i) =>
-      Math.abs(data[i]   - targetR) < 30 &&
-      Math.abs(data[i+1] - targetG) < 30 &&
-      Math.abs(data[i+2] - targetB) < 30 &&
-      Math.abs(data[i+3] - targetA) < 30;
-
-    const stack = [[px, py]];
-    const visited = new Uint8Array(w * h);
-
-    while (stack.length) {
-      const [cx, cy] = stack.pop();
-      if (cx < 0 || cx >= w || cy < 0 || cy >= h) continue;
-      const ci = cy * w + cx;
-      if (visited[ci]) continue;
-      visited[ci] = 1;
-      const di = ci * 4;
-      if (!match(di)) continue;
-
-      data[di]   = fillR;
-      data[di+1] = fillG;
-      data[di+2] = fillB;
-      data[di+3] = 255;
-
-      stack.push([cx+1, cy], [cx-1, cy], [cx, cy+1], [cx, cy-1]);
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-    syncDisplay();
-    setCompleted(prev => new Set([...prev, activePart]));
-  }, [color, activePart, syncDisplay]);
-
-  const startDraw = useCallback((e) => {
-    e.preventDefault();
-    setIsDrawing(true);
-    const pos = getPos(e);
-    lastPos.current = pos;
-
-    if (tool === 'fill') {
-      fillAt(pos.x, pos.y);
-      return;
-    }
-
-    // Починаємо нову лінію
-    const ctx = ctxRefs.current[activePart];
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, brushSize / 2, 0, Math.PI * 2);
-    ctx.fillStyle = tool === 'eraser' ? 'rgba(0,0,0,0)' : color;
-    if (tool === 'eraser') {
-      ctx.globalCompositeOperation = 'destination-out';
-    } else {
-      ctx.globalCompositeOperation = 'source-over';
-    }
-    ctx.fill();
-    syncDisplay();
-  }, [activePart, tool, fillAt, getPos, syncDisplay, color, brushSize]);
-
-
-  const draw = useCallback((e) => {
-    if (!isDrawing || tool === 'fill') return;
-    e.preventDefault();
-
-    const pos = getPos(e);
-    const ctx = ctxRefs.current[activePart];
-
-    ctx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
-    ctx.strokeStyle = color;
-    ctx.lineWidth   = brushSize;
-    ctx.lineCap     = 'round';
-    ctx.lineJoin    = 'round';
-
-    ctx.beginPath();
-    ctx.moveTo(lastPos.current.x, lastPos.current.y);
-    ctx.lineTo(pos.x, pos.y);
-    ctx.stroke();
-
-    lastPos.current = pos;
-    syncDisplay();
-  }, [isDrawing, activePart, getPos, syncDisplay, tool, color, brushSize]);
-
-
-  const stopDraw = useCallback(() => {
-    setIsDrawing(false);
-    lastPos.current = null;
-
-    // Позначаємо частину як намальовану якщо canvas не порожній
-    const canvas = canvasEls.current[activePart];
-    const ctx    = canvas.getContext('2d');
-    const data   = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    const hasPixels = data.some((v, i) => i % 4 === 3 && v > 0);
-    if (hasPixels) {
-      setCompleted(prev => new Set([...prev, activePart]));
-    }
-  }, [activePart]);
-
-
-  // ── Flood fill ────────────────────────────────────────────────────
-
-
-
-  const clearPart = () => {
-    const canvas = canvasEls.current[activePart];
-    const ctx    = ctxRefs.current[activePart];
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    setCompleted(prev => {
-      const next = new Set(prev);
-      next.delete(activePart);
-      return next;
+    setSelectedParts((prev) => {
+      if (prev[partKey] !== partId) return prev;
+      return {
+        ...prev,
+        [partKey]: null,
+      };
     });
-    syncDisplay();
+  };
+
+  const partSourceLabel = (partKey) => {
+    const selectedId = selectedParts[partKey];
+    if (!selectedId) return 'Generated';
+    const exists = (partLibrary[partKey] || []).some((item) => item.id === selectedId);
+    return exists ? 'Custom' : 'Generated';
   };
 
   const handleComplete = () => {
-    const parts = {};
-    PARTS.forEach(part => {
-      parts[part.id] = canvasEls.current[part.id];
+    console.log('[Editor] Kitten generated, entering game');
+    onComplete({
+      parts,
+      kitten,
+      selectedParts,
+      partLibrary,
     });
-    console.log('[Editor] Completed parts:', Object.keys(parts));
-    onComplete(parts);
   };
-
-  const currentPart = PARTS.find(p => p.id === activePart);
 
   return (
     <div style={s.wrapper}>
-      <h1 style={s.title}>🎨 Draw your cat</h1>
+      {topBar}
 
-      {/* Вибір частини тіла */}
-      <div style={s.partSelector}>
-        {PARTS.map(part => (
+      <div style={s.headerRow}>
+        <h1 style={s.title}>Kitten Builder</h1>
+        <p style={s.subtitle}>Create your kitten skin, scroll through options, then enter the online room.</p>
+      </div>
+
+      <div style={s.presetRow}>
+        {FUR_PRESETS.map((preset) => (
           <button
-            key={part.id}
-            onClick={() => setActivePart(part.id)}
-            style={{
-              ...s.partBtn,
-              ...(activePart === part.id ? s.partBtnActive : {}),
-              ...(completedParts.has(part.id) ? s.partBtnDone : {}),
-            }}
+            key={preset.name}
+            style={{ ...s.presetBtn, background: preset.fur }}
+            onClick={() => applyPreset(preset)}
+            title={`Apply ${preset.name}`}
           >
-            {part.label}
-            {completedParts.has(part.id) && <span style={s.checkmark}>✓</span>}
+            {preset.name}
           </button>
         ))}
       </div>
 
-      {/* Підказка */}
-      <p style={s.hint}>{currentPart.hint}</p>
-
-      <div style={s.main}>
-
-        <div style={s.toolbar}>
-          {/* Інструменти */}
-          <div style={s.toolGroup}>
-            {[
-              { id: 'brush',  label: '✏️' },
-              { id: 'eraser', label: '⬜' },
-              { id: 'fill',   label: '🪣' },
-            ].map(t => (
-              <button
-                key={t.id}
-                onClick={() => setTool(t.id)}
-                style={{ ...s.toolBtn, ...(tool === t.id ? s.toolBtnActive : {}) }}
-                title={t.id}
-              >{t.label}</button>
-            ))}
-          </div>
-
-          {/* Розмір пензля */}
-          <div style={s.toolGroup}>
-            <label style={s.label}>Size</label>
-            <input
-              type="range" min="2" max="40" value={brushSize}
-              onChange={e => setBrushSize(Number(e.target.value))}
-              style={s.slider}
-            />
-            <span style={s.label}>{brushSize}px</span>
-          </div>
-
-          {/* Очистити */}
-          <button onClick={clearPart} style={s.clearBtn}>🗑 Clean</button>
-        </div>
-
-        {/* Canvas */}
-        <div style={s.canvasWrapper}>
-          <canvas
-            ref={displayRef}
-            style={{
-              ...s.canvas,
-              width:  currentPart.size[0] * 2,
-              height: currentPart.size[1] * 2,
-              cursor: tool === 'eraser' ? 'cell' : tool === 'fill' ? 'crosshair' : 'default',
-            }}
-            onPointerDown={startDraw}
-            onPointerMove={draw}
-            onPointerUp={stopDraw}
-            onPointerLeave={stopDraw}
-            onTouchStart={startDraw}
-            onTouchMove={draw}
-            onTouchEnd={stopDraw}
-          />
-        </div>
-
-        {/* Палітра */}
-        <div style={s.palette}>
-          {/* <PopoverColorPicker 
-            color={color} 
-            onChange={(newColor) => {
-              setColor(newColor);
-              setTool('brush'); 
-            }} 
-          /> */}
-          {/* Кастомний колір */}
+      <div style={s.layout}>
+        <div style={s.panel}>
+          <label style={s.label}>Kitten name</label>
           <input
-            type="color" value={color}
-            onChange={e => { setColor(e.target.value); setTool('brush'); }}
-            style={s.colorInput}
-            title="Your custom color"
+            type="text"
+            value={kitten.name}
+            onChange={(e) => setField('name', e.target.value.slice(0, 24))}
+            style={s.input}
+            placeholder="Your kitten"
           />
+
+          <div style={s.colorsGrid}>
+            <label style={s.colorField}><span>Fur</span><input type="color" value={kitten.furColor} onChange={(e) => setField('furColor', e.target.value)} /></label>
+            <label style={s.colorField}><span>Belly</span><input type="color" value={kitten.bellyColor} onChange={(e) => setField('bellyColor', e.target.value)} /></label>
+            <label style={s.colorField}><span>Pattern</span><input type="color" value={kitten.patternColor} onChange={(e) => setField('patternColor', e.target.value)} /></label>
+            <label style={s.colorField}><span>Eyes</span><input type="color" value={kitten.eyeColor} onChange={(e) => setField('eyeColor', e.target.value)} /></label>
+            <label style={s.colorField}><span>Ear inside</span><input type="color" value={kitten.earColor} onChange={(e) => setField('earColor', e.target.value)} /></label>
+          </div>
+
+          <label style={s.label}>Pattern</label>
+          <select
+            value={kitten.patternType}
+            onChange={(e) => setField('patternType', e.target.value)}
+            style={s.input}
+          >
+            {PATTERN_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+
+          <label style={s.label}>Eyes style</label>
+          <select
+            value={kitten.eyeStyle}
+            onChange={(e) => setField('eyeStyle', e.target.value)}
+            style={s.input}
+          >
+            {EYE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+
+          <label style={s.toggleRow}>
+            <input
+              type="checkbox"
+              checked={kitten.hasSocks}
+              onChange={(e) => setField('hasSocks', e.target.checked)}
+            />
+            White socks on paws
+          </label>
+
+          <label style={s.toggleRow}>
+            <input
+              type="checkbox"
+              checked={kitten.hasTailTip}
+              onChange={(e) => setField('hasTailTip', e.target.checked)}
+            />
+            Light tail tip
+          </label>
+
+          <div style={s.customSection}>
+            <h3 style={s.customHeading}>Your drawn skin parts</h3>
+            <p style={s.customHint}>Upload transparent PNG files and pick which one to use for each body part.</p>
+
+            {PART_KEYS.map((partKey) => {
+              const list = partLibrary[partKey] || [];
+              const selectedId = selectedParts[partKey];
+
+              return (
+                <div key={partKey} style={s.customPartCard}>
+                  <div style={s.customPartHeader}>
+                    <strong>{PART_LABELS[partKey]}</strong>
+                    <label style={s.uploadBtn}>
+                      Add image
+                      <input
+                        type="file"
+                        accept="image/png,image/webp,image/jpeg"
+                        style={s.hiddenInput}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          uploadPart(partKey, file);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  <div style={s.choiceRow}>
+                    <button
+                      type="button"
+                      style={{
+                        ...s.generatedChoice,
+                        ...(selectedId ? null : s.generatedChoiceActive),
+                      }}
+                      onClick={() => choosePart(partKey, null)}
+                    >
+                      Use generated
+                    </button>
+
+                    {list.map((item) => {
+                      const isSelected = item.id === selectedId;
+
+                      return (
+                        <div key={item.id} style={s.choiceItemWrap}>
+                          <button
+                            type="button"
+                            style={{
+                              ...s.choiceItem,
+                              ...(isSelected ? s.choiceItemActive : null),
+                            }}
+                            onClick={() => choosePart(partKey, item.id)}
+                            title={item.name}
+                          >
+                            <img src={item.dataUrl} alt={item.name} style={s.choiceImg} />
+                            <span style={s.choiceLabel}>{item.name}</span>
+                          </button>
+                          <button
+                            type="button"
+                            style={s.removeChoiceBtn}
+                            onClick={() => removePart(partKey, item.id)}
+                            title="Delete from library"
+                          >
+                            X
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {list.length === 0 && (
+                      <span style={s.emptyChoiceHint}>No uploaded items yet</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={s.actionsRow}>
+            <button style={s.secondaryBtn} onClick={randomize}>Random</button>
+            <button style={s.secondaryBtn} onClick={resetToDefault}>Reset</button>
+            <button style={s.primaryBtn} onClick={handleComplete}>Play as this kitten</button>
+          </div>
         </div>
 
-      </div>
+        <div style={s.previewPanel}>
+          <h2 style={s.previewHeading}>Preview parts</h2>
+          <p style={s.previewHint}>These canvases are applied directly to the current Spine skeleton.</p>
 
-      {/* Кнопка завершення */}
-      <button
-        onClick={handleComplete}
-        style={s.doneBtn}
-      >
-        Play!
-      </button>
-      <p style={s.doneHint}>
-        Drew: {completedParts.size}/{PARTS.length} parts completed
-        {completedParts.size === 0 && ' — could be a good idea to start with the head!'}
-      </p>
+          <div style={s.previewGrid}>
+            <CanvasPreview title="Head" sourceCanvas={parts.head} sourceLabel={partSourceLabel('head')} />
+            <CanvasPreview title="Body" sourceCanvas={parts.body} sourceLabel={partSourceLabel('body')} />
+            <CanvasPreview title="Leg" sourceCanvas={parts.leg} sourceLabel={partSourceLabel('leg')} />
+            <CanvasPreview title="Tail" sourceCanvas={parts.tail} sourceLabel={partSourceLabel('tail')} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
 
-// ── Стилі ─────────────────────────────────────────────────────────
-
 const s = {
   wrapper: {
-    minHeight:      '100vh',
-    background:     '#0f0f1a',
-    display:        'flex',
-    flexDirection:  'column',
-    alignItems:     'center',
-    padding:        '20px',
-    gap:            '16px',
-    fontFamily:     '"Courier New", monospace',
-    boxSizing:      'border-box',
+    height: '100dvh',
+    background: 'transparent',
+    color: '#edf0ff',
+    fontFamily: '"Trebuchet MS", "Verdana", sans-serif',
+    padding: '20px',
+    paddingBottom: '34px',
+    boxSizing: 'border-box',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '16px',
+    overflowY: 'auto',
+    WebkitOverflowScrolling: 'touch',
+  },
+  headerRow: {
+    maxWidth: 1100,
+    width: '100%',
+    margin: '0 auto',
   },
   title: {
-    color:         '#e0e0ff',
-    fontSize:      '1.6rem',
-    letterSpacing: '0.1em',
-    margin:        0,
+    margin: 0,
+    fontSize: '2rem',
+    letterSpacing: '0.03em',
   },
-  partSelector: {
-    display:        'flex',
-    gap:            '8px',
-    flexWrap:       'wrap',
-    justifyContent: 'center',
+  subtitle: {
+    marginTop: 6,
+    marginBottom: 0,
+    opacity: 0.75,
   },
-  partBtn: {
-    padding:      '8px 16px',
-    background:   'rgba(255,255,255,0.06)',
-    border:       '1px solid rgba(255,255,255,0.15)',
-    borderRadius: '8px',
-    color:        '#c0c0ff',
-    cursor:       'pointer',
-    fontSize:     '0.9rem',
-    position:     'relative',
-    transition:   'all 0.15s',
+  presetRow: {
+    maxWidth: 1100,
+    width: '100%',
+    margin: '0 auto',
+    display: 'flex',
+    gap: 8,
+    flexWrap: 'wrap',
   },
-  partBtnActive: {
-    background:   'rgba(100,100,255,0.25)',
-    border:       '1px solid rgba(100,100,255,0.6)',
-    color:        '#ffffff',
+  presetBtn: {
+    border: '1px solid rgba(255,255,255,0.35)',
+    color: '#0d111e',
+    fontWeight: 700,
+    borderRadius: 10,
+    padding: '8px 12px',
+    cursor: 'pointer',
+    minWidth: 84,
   },
-  partBtnDone: {
-    borderColor: 'rgba(100,255,150,0.5)',
+  layout: {
+    width: '100%',
+    maxWidth: 1100,
+    margin: '0 auto',
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    gap: 16,
+    alignItems: 'start',
   },
-  checkmark: {
-    position:   'absolute',
-    top:        '-6px',
-    right:      '-6px',
-    fontSize:   '10px',
-    background: '#4caf50',
-    color:      'white',
-    borderRadius: '50%',
-    width:      '16px',
-    height:     '16px',
-    display:    'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  hint: {
-    color:    'rgba(200,200,255,0.5)',
-    fontSize: '0.85rem',
-    margin:   0,
-    textAlign:'center',
-    maxWidth: '500px',
-  },
-  main: {
-    display:       'flex',
-    gap:           '16px',
-    alignItems:    'flex-start',
-    flexWrap:      'wrap',
-    justifyContent:'center',
-  },
-  toolbar: {
-    display:       'flex',
+  panel: {
+    background: 'rgba(9,10,17,0.5)',
+    border: '1px solid rgba(255,255,255,0.15)',
+    borderRadius: 14,
+    padding: 16,
+    display: 'flex',
     flexDirection: 'column',
-    gap:           '12px',
-    padding:       '12px',
-    background:    'rgba(255,255,255,0.05)',
-    border:        '1px solid rgba(255,255,255,0.1)',
-    borderRadius:  '8px',
-    minWidth:      '120px',
-  },
-  toolGroup: {
-    display:       'flex',
-    flexDirection: 'column',
-    gap:           '6px',
-  },
-  toolBtn: {
-    padding:      '8px',
-    background:   'rgba(255,255,255,0.06)',
-    border:       '1px solid rgba(255,255,255,0.1)',
-    borderRadius: '6px',
-    color:        '#c0c0ff',
-    cursor:       'pointer',
-    fontSize:     '1.2rem',
-  },
-  toolBtnActive: {
-    background: 'rgba(100,100,255,0.3)',
-    border:     '1px solid rgba(100,100,255,0.6)',
+    gap: 10,
   },
   label: {
-    color:    'rgba(200,200,255,0.5)',
-    fontSize: '0.75rem',
+    fontSize: 13,
+    opacity: 0.85,
   },
-  slider: {
-    width: '100%',
+  input: {
+    background: '#121727',
+    color: '#f0f4ff',
+    border: '1px solid rgba(255,255,255,0.2)',
+    borderRadius: 8,
+    padding: '8px 10px',
+    fontSize: 14,
   },
-  clearBtn: {
-    padding:      '8px',
-    background:   'rgba(255,80,80,0.15)',
-    border:       '1px solid rgba(255,80,80,0.3)',
-    borderRadius: '6px',
-    color:        '#ff8080',
-    cursor:       'pointer',
-    fontSize:     '0.8rem',
+  colorsGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 8,
   },
-  canvasWrapper: {
-    border:       '2px solid rgba(255,255,255,0.15)',
-    borderRadius: '8px',
-    overflow:     'hidden',
-    lineHeight:   0,
+  colorField: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    fontSize: 13,
+    gap: 8,
   },
-  canvas: {
-    display:   'block',
+  toggleRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    fontSize: 14,
+    opacity: 0.95,
+  },
+  customSection: {
+    marginTop: 6,
+    padding: 10,
+    borderRadius: 10,
+    background: 'rgba(255,255,255,0.03)',
+    border: '1px solid rgba(255,255,255,0.12)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+    maxHeight: '44vh',
+    overflowY: 'auto',
+    WebkitOverflowScrolling: 'touch',
+  },
+  customHeading: {
+    margin: 0,
+    fontSize: 15,
+  },
+  customHint: {
+    margin: 0,
+    fontSize: 12,
+    opacity: 0.75,
+  },
+  customPartCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    padding: 8,
+    borderRadius: 10,
+    background: 'rgba(0,0,0,0.2)',
+    border: '1px solid rgba(255,255,255,0.1)',
+  },
+  customPartHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  uploadBtn: {
+    background: 'rgba(100,200,255,0.2)',
+    border: '1px solid rgba(100,200,255,0.45)',
+    borderRadius: 8,
+    padding: '6px 10px',
+    fontSize: 12,
+    cursor: 'pointer',
+    color: '#dff7ff',
+    fontWeight: 700,
+  },
+  hiddenInput: {
+    display: 'none',
+  },
+  choiceRow: {
+    display: 'flex',
+    gap: 8,
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  generatedChoice: {
+    border: '1px solid rgba(255,255,255,0.22)',
+    background: 'rgba(255,255,255,0.05)',
+    color: '#eef3ff',
+    borderRadius: 8,
+    padding: '8px 10px',
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  generatedChoiceActive: {
+    border: '1px solid rgba(86,231,143,0.8)',
+    boxShadow: '0 0 0 2px rgba(86,231,143,0.25) inset',
+  },
+  choiceItemWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+  },
+  choiceItem: {
+    border: '1px solid rgba(255,255,255,0.22)',
+    background: 'rgba(255,255,255,0.04)',
+    borderRadius: 8,
+    padding: 6,
+    cursor: 'pointer',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 4,
+    width: 82,
+  },
+  choiceItemActive: {
+    border: '1px solid rgba(86,231,143,0.8)',
+    boxShadow: '0 0 0 2px rgba(86,231,143,0.22) inset',
+  },
+  choiceImg: {
+    width: 54,
+    height: 54,
+    objectFit: 'contain',
     imageRendering: 'pixelated',
-    touchAction: 'none',
+    borderRadius: 6,
+    background: 'linear-gradient(45deg, #555 25%, #777 25%, #777 50%, #555 50%, #555 75%, #777 75%, #777 100%)',
+    backgroundSize: '12px 12px',
   },
-  palette: {
-    display:        'flex',
-    flexDirection:  'column',
-    flexWrap:       'wrap',
-    gap:            '6px',
-    maxHeight:      '400px',
-    padding:        '12px',
-    background:     'rgba(255,255,255,0.05)',
-    border:         '1px solid rgba(255,255,255,0.1)',
-    borderRadius:   '8px',
+  choiceLabel: {
+    fontSize: 10,
+    lineHeight: 1.1,
+    maxWidth: '100%',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
-  colorBtn: {
-    width:        '32px',
-    height:       '32px',
-    borderRadius: '50%',
-    border:       '2px solid rgba(255,255,255,0.2)',
-    cursor:       'pointer',
-    padding:      0,
-    transition:   'transform 0.1s',
+  removeChoiceBtn: {
+    border: '1px solid rgba(255,120,120,0.4)',
+    background: 'rgba(255,120,120,0.15)',
+    color: '#ffdede',
+    borderRadius: 8,
+    width: 24,
+    height: 24,
+    fontSize: 10,
+    cursor: 'pointer',
   },
-  colorInput: {
-    width:        '32px',
-    height:       '32px',
-    borderRadius: '50%',
-    border:       '2px solid rgba(255,255,255,0.2)',
-    cursor:       'pointer',
-    padding:      0,
-    background:   'none',
+  emptyChoiceHint: {
+    fontSize: 12,
+    opacity: 0.65,
   },
-  doneBtn: {
-    padding:      '14px 40px',
-    background:   'rgba(100,200,150,0.2)',
-    border:       '2px solid rgba(100,200,150,0.5)',
-    borderRadius: '12px',
-    color:        '#a0ffc0',
-    cursor:       'pointer',
-    fontSize:     '1.1rem',
-    fontFamily:   '"Courier New", monospace',
-    letterSpacing:'0.1em',
-    transition:   'all 0.2s',
+  actionsRow: {
+    display: 'flex',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginTop: 6,
   },
-  doneHint: {
-    color:    'rgba(200,200,255,0.4)',
-    fontSize: '0.8rem',
-    margin:   0,
+  primaryBtn: {
+    flex: '1 1 180px',
+    background: 'linear-gradient(135deg, #56e78f 0%, #3ec8cb 100%)',
+    color: '#09101f',
+    border: 'none',
+    borderRadius: 10,
+    padding: '10px 14px',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  secondaryBtn: {
+    background: 'rgba(255,255,255,0.11)',
+    color: '#f0f4ff',
+    border: '1px solid rgba(255,255,255,0.25)',
+    borderRadius: 10,
+    padding: '10px 12px',
+    cursor: 'pointer',
+  },
+  previewPanel: {
+    background: 'rgba(9,10,17,0.5)',
+    border: '1px solid rgba(255,255,255,0.15)',
+    borderRadius: 14,
+    padding: 16,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+  },
+  previewHeading: {
+    margin: 0,
+    fontSize: '1.1rem',
+  },
+  previewHint: {
+    margin: 0,
+    opacity: 0.7,
+    fontSize: 13,
+  },
+  previewGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+    gap: 10,
+  },
+  previewCard: {
+    background: 'rgba(255,255,255,0.03)',
+    borderRadius: 12,
+    padding: 10,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 6,
+  },
+  previewTitle: {
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+    opacity: 0.75,
+  },
+  previewSource: {
+    fontSize: 11,
+    opacity: 0.65,
   },
 };
 
