@@ -19,6 +19,7 @@ const CHAT_POOL_LIMIT = 40;
 const TAB_LOCK_KEY = 'cat-game.active-tab.v1';
 const TAB_LOCK_TTL_MS = 6000;
 const TAB_LOCK_HEARTBEAT_MS = 2000;
+const PRESENCE_STALE_AFTER_MS = 15000;
 
 const ROOM_NAME =
   new URLSearchParams(window.location.search).get('room') ||
@@ -131,18 +132,25 @@ function sanitizeError(error, fallback = 'Unexpected error') {
 
 function toPresencePlayers(presenceState) {
   const players = [];
+  const now = Date.now();
 
   Object.entries(presenceState || {}).forEach(([presenceKey, metas]) => {
     const list = Array.isArray(metas) ? metas : [];
-    list.forEach((meta, index) => {
-      players.push({
-        presenceKey: `${presenceKey}:${index}`,
-        userId: typeof meta?.userId === 'string' ? meta.userId : presenceKey,
-        name: typeof meta?.name === 'string' ? meta.name : 'Cat player',
-        x: Number.isFinite(meta?.x) ? meta.x : CONFIG.WIDTH / 2,
-        y: Number.isFinite(meta?.y) ? meta.y : CONFIG.FLOOR_Y,
-        facingRight: meta?.facingRight !== false,
-      });
+    if (list.length === 0) return;
+
+    const meta = list[list.length - 1];
+    const updatedAt = Number(meta?.updatedAt);
+    if (Number.isFinite(updatedAt) && now - updatedAt > PRESENCE_STALE_AFTER_MS) {
+      return;
+    }
+
+    players.push({
+      presenceKey,
+      userId: typeof meta?.userId === 'string' ? meta.userId : presenceKey,
+      name: typeof meta?.name === 'string' ? meta.name : 'Cat player',
+      x: Number.isFinite(meta?.x) ? meta.x : CONFIG.WIDTH / 2,
+      y: Number.isFinite(meta?.y) ? meta.y : CONFIG.FLOOR_Y,
+      facingRight: meta?.facingRight !== false,
     });
   });
 
@@ -602,7 +610,7 @@ const App = () => {
 
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
     const localPresenceKey = `${user.id}:${tabIdRef.current}`;
-    localPresenceKeyRef.current = `${localPresenceKey}:0`;
+    localPresenceKeyRef.current = localPresenceKey;
 
     const channel = supabase.channel(ROOM_CHANNEL, {
       config: {
@@ -628,7 +636,7 @@ const App = () => {
     channel.on('broadcast', { event: 'chat' }, (event) => {
       const payload = event?.payload || event || {};
       const fromId = typeof payload.userId === 'string' ? payload.userId : null;
-      const fromPresenceKey = typeof payload.presenceKey === 'string' ? `${payload.presenceKey}:0` : null;
+      const fromPresenceKey = typeof payload.presenceKey === 'string' ? payload.presenceKey : null;
       const message = typeof payload.message === 'string' ? payload.message.trim() : '';
       const sender = typeof payload.name === 'string' ? payload.name : 'Cat player';
 
