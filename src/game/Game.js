@@ -18,8 +18,22 @@ import {
   createCat,
   createBall,
   InputComponent,
+  SpineComponent,
   TransformComponent,
 } from '../entities/index.js';
+
+const CHAT_BUBBLE = {
+  fontSize: 16,
+  wordWrapWidth: 250,
+  minWidth: 96,
+  minHeight: 42,
+  padX: 30,
+  padY: 18,
+  radius: 12,
+  tailHalfWidth: 11,
+  tailHeight: 12,
+  offsetY: -210,
+};
 
 export class Game {
   constructor(canvas, options = {}) {
@@ -43,7 +57,10 @@ export class Game {
       backgroundColor: CONFIG.BG_COLOR,
       view:            canvas,
       antialias:       true,
+      resolution:      window.devicePixelRatio || 1,
+      autoDensity:     true,
     });
+    this._app.renderer.roundPixels = true;
 
     this._world      = new World();
     this._catEntity  = null;
@@ -125,7 +142,7 @@ export class Game {
     const activeIds = new Set();
 
     incoming.forEach((player) => {
-      const id = player?.userId || player?.id;
+      const id = player?.presenceKey || player?.userId || player?.id;
       if (!id) return;
 
       activeIds.add(id);
@@ -268,36 +285,40 @@ export class Game {
 
   _createSpeechBubble(message) {
     const container = new PIXI.Container();
+    container.roundPixels = true;
 
     const text = new PIXI.Text(message, {
       fontFamily: 'purrabet-regular',
-      fontSize: 12,
+      fontSize: CHAT_BUBBLE.fontSize,
       fill: '#12243e',
       align: 'center',
       wordWrap: true,
-      wordWrapWidth: 180,
-      lineHeight: 16,
+      wordWrapWidth: CHAT_BUBBLE.wordWrapWidth,
+      lineHeight: 20,
+      breakWords: true,
     });
+    text.resolution = 2;
+    text.roundPixels = true;
     text.anchor.set(0.5, 0);
     text.x = 0;
-    text.y = 7;
+    text.y = 9;
 
-    const bubbleW = Math.max(56, Math.ceil(text.width + 20));
-    const bubbleH = Math.max(28, Math.ceil(text.height + 14));
+    const bubbleW = Math.max(CHAT_BUBBLE.minWidth, Math.ceil(text.width + CHAT_BUBBLE.padX));
+    const bubbleH = Math.max(CHAT_BUBBLE.minHeight, Math.ceil(text.height + CHAT_BUBBLE.padY));
 
     const bg = new PIXI.Graphics();
     bg.beginFill(0xffffff, 0.95);
     bg.lineStyle(2, 0x2a456d, 0.9);
-    bg.drawRoundedRect(-bubbleW / 2, 0, bubbleW, bubbleH, 10);
-    bg.moveTo(-9, bubbleH - 1);
-    bg.lineTo(0, bubbleH + 11);
-    bg.lineTo(9, bubbleH - 1);
-    bg.lineTo(-9, bubbleH - 1);
+    bg.drawRoundedRect(-bubbleW / 2, 0, bubbleW, bubbleH, CHAT_BUBBLE.radius);
+    bg.moveTo(-CHAT_BUBBLE.tailHalfWidth, bubbleH - 1);
+    bg.lineTo(0, bubbleH + CHAT_BUBBLE.tailHeight);
+    bg.lineTo(CHAT_BUBBLE.tailHalfWidth, bubbleH - 1);
+    bg.lineTo(-CHAT_BUBBLE.tailHalfWidth, bubbleH - 1);
     bg.endFill();
 
     container.addChild(bg);
     container.addChild(text);
-    container.y = -236;
+    container.y = CHAT_BUBBLE.offsetY;
 
     return container;
   }

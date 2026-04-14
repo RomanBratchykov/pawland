@@ -15,6 +15,10 @@ const SCREEN = {
 };
 
 const CHAT_MAX_LENGTH = 120;
+const CHAT_POOL_LIMIT = 40;
+const TAB_LOCK_KEY = 'cat-game.active-tab.v1';
+const TAB_LOCK_TTL_MS = 6000;
+const TAB_LOCK_HEARTBEAT_MS = 2000;
 
 const ROOM_NAME =
   new URLSearchParams(window.location.search).get('room') ||
@@ -23,6 +27,45 @@ const ROOM_NAME =
 const ROOM_CHANNEL = `cat-room-${ROOM_NAME}`;
 
 const DECOR_IMAGES = ['/assets/heart.png', '/assets/star.png'];
+
+function createTabId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function readTabLock() {
+  try {
+    const raw = localStorage.getItem(TAB_LOCK_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeTabLock(lock) {
+  try {
+    localStorage.setItem(TAB_LOCK_KEY, JSON.stringify(lock));
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function clearTabLockIfOwned(userId, tabId) {
+  const lock = readTabLock();
+  if (!lock) return;
+  if (lock.userId !== userId || lock.tabId !== tabId) return;
+
+  try {
+    localStorage.removeItem(TAB_LOCK_KEY);
+  } catch {
+    // Ignore storage errors.
+  }
+}
 
 function seededUnit(index, seed) {
   const value = Math.sin((index + 1) * 12.9898 + seed * 78.233) * 43758.5453;
@@ -87,20 +130,23 @@ function sanitizeError(error, fallback = 'Unexpected error') {
 }
 
 function toPresencePlayers(presenceState) {
-  return Object.entries(presenceState || {})
-    .map(([userId, metas]) => {
-      const last = Array.isArray(metas) && metas.length > 0 ? metas[metas.length - 1] : null;
-      if (!last) return null;
+  const players = [];
 
-      return {
-        userId,
-        name: typeof last.name === 'string' ? last.name : 'Cat player',
-        x: Number.isFinite(last.x) ? last.x : CONFIG.WIDTH / 2,
-        y: Number.isFinite(last.y) ? last.y : CONFIG.FLOOR_Y,
-        facingRight: last.facingRight !== false,
-      };
-    })
-    .filter(Boolean);
+  Object.entries(presenceState || {}).forEach(([presenceKey, metas]) => {
+    const list = Array.isArray(metas) ? metas : [];
+    list.forEach((meta, index) => {
+      players.push({
+        presenceKey: `${presenceKey}:${index}`,
+        userId: typeof meta?.userId === 'string' ? meta.userId : presenceKey,
+        name: typeof meta?.name === 'string' ? meta.name : 'Cat player',
+        x: Number.isFinite(meta?.x) ? meta.x : CONFIG.WIDTH / 2,
+        y: Number.isFinite(meta?.y) ? meta.y : CONFIG.FLOOR_Y,
+        facingRight: meta?.facingRight !== false,
+      });
+    });
+  });
+
+  return players;
 }
 
 const App = () => {
@@ -120,12 +166,18 @@ const App = () => {
   const [onlinePlayers, setOnlinePlayers] = useState([]);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatText, setChatText] = useState('');
+  const [chatMessages, setChatMessages] = useState([]);
+  const [tabBlocked, setTabBlocked] = useState(false);
+  const [roomLinkCopied, setRoomLinkCopied] = useState(false);
 
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
   const roomChannelRef = useRef(null);
   const localPresenceRef = useRef(null);
+  const localPresenceKeyRef = useRef('');
   const chatInputRef = useRef(null);
+  const tabIdRef = useRef(createTabId());
+  const roomLinkResetTimerRef = useRef(null);
 
   const withBackground = (content) => (
     <div className="app-bg-shell">
@@ -133,6 +185,59 @@ const App = () => {
       <div className="app-bg-content">{content}</div>
     </div>
   );
+
+  const appendChatMessage = useCallback((item) => {
+    setChatMessages((prev) => {
+      const next = [...prev, item];
+      return next.length > CHAT_POOL_LIMIT ? next.slice(next.length - CHAT_POOL_LIMIT) : next;
+    });
+  }, []);
+
+  const copyRoomLink = useCallback(async () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('room', ROOM_NAME);
+    const text = url.toString();
+
+    const fallbackCopy = () => {
+      const input = document.createElement('textarea');
+      input.value = text;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(input);
+      return ok;
+    };
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else if (!fallbackCopy()) {
+        throw new Error('Clipboard API unavailable');
+      }
+
+      setRoomLinkCopied(true);
+      if (roomLinkResetTimerRef.current) {
+        clearTimeout(roomLinkResetTimerRef.current);
+      }
+      roomLinkResetTimerRef.current = setTimeout(() => {
+        setRoomLinkCopied(false);
+        roomLinkResetTimerRef.current = null;
+      }, 1800);
+    } catch {
+      setErrorText('Could not copy room link. Please copy the URL manually.');
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (!roomLinkResetTimerRef.current) return;
+      clearTimeout(roomLinkResetTimerRef.current);
+      roomLinkResetTimerRef.current = null;
+    };
+  }, []);
 
   const loadUserData = useCallback(async (sessionUser) => {
     setScreen(SCREEN.LOADING);
@@ -191,7 +296,7 @@ const App = () => {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       const sessionUser = session?.user ?? null;
 
       setUser(sessionUser);
@@ -203,6 +308,10 @@ const App = () => {
         setEditorInitial(null);
         setSkinCanvases(null);
         setScreen(SCREEN.AUTH);
+        return;
+      }
+
+      if (event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') {
         return;
       }
 
@@ -299,7 +408,7 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (screen !== SCREEN.ROOM) return undefined;
+    if (screen !== SCREEN.ROOM || tabBlocked) return undefined;
     if (!canvasRef.current) return undefined;
 
     const game = new Game(canvasRef.current, {
@@ -324,7 +433,7 @@ const App = () => {
         gameRef.current = null;
       }
     };
-  }, [screen]);
+  }, [screen, tabBlocked]);
 
   useEffect(() => {
     if (!gameRef.current || !skinCanvases) return;
@@ -333,8 +442,59 @@ const App = () => {
 
   const remotePlayers = useMemo(() => {
     if (!user) return [];
-    return onlinePlayers.filter((player) => player.userId !== user.id);
+    return onlinePlayers.filter((player) => player.presenceKey !== localPresenceKeyRef.current);
   }, [onlinePlayers, user]);
+
+  useEffect(() => {
+    if (screen !== SCREEN.ROOM || !user) {
+      setTabBlocked(false);
+      return undefined;
+    }
+
+    const tabId = tabIdRef.current;
+
+    const evaluateLock = () => {
+      const now = Date.now();
+      const lock = readTabLock();
+      const lockIsFresh = lock && Number.isFinite(lock.updatedAt) && (now - lock.updatedAt) < TAB_LOCK_TTL_MS;
+
+      if (lockIsFresh && lock.userId === user.id && lock.tabId !== tabId) {
+        setTabBlocked(true);
+        return false;
+      }
+
+      setTabBlocked(false);
+      writeTabLock({ userId: user.id, tabId, updatedAt: now });
+      return true;
+    };
+
+    evaluateLock();
+
+    const timer = setInterval(() => {
+      evaluateLock();
+    }, TAB_LOCK_HEARTBEAT_MS);
+
+    const onStorage = (event) => {
+      if (event.key !== TAB_LOCK_KEY) return;
+      evaluateLock();
+    };
+
+    const onPageHide = () => {
+      clearTabLockIfOwned(user.id, tabId);
+    };
+
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('beforeunload', onPageHide);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onPageHide);
+      clearTabLockIfOwned(user.id, tabId);
+    };
+  }, [screen, user]);
 
   useEffect(() => {
     if (!gameRef.current) return;
@@ -348,23 +508,44 @@ const App = () => {
       return undefined;
     }
 
+    const closeChat = () => {
+      setChatOpen(false);
+      setChatText('');
+    };
+
     const onKeyDown = (event) => {
       const key = String(event.key || '').toLowerCase();
+      const target = event.target;
+      const isEditable = Boolean(
+        target && (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable
+        )
+      );
+
+      // Ignore game-level shortcuts while typing in inputs.
+      if (isEditable) {
+        return;
+      }
 
       if (key === 't') {
         event.preventDefault();
         setChatOpen((prev) => !prev);
+        if (chatOpen) setChatText('');
         return;
       }
 
       if (key === 'escape') {
-        setChatOpen(false);
+        event.preventDefault();
+        closeChat();
+        return;
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [screen]);
+  }, [screen, chatOpen]);
 
   useEffect(() => {
     if (!chatOpen) return;
@@ -380,6 +561,13 @@ const App = () => {
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
 
     gameRef.current?.setLocalChatBubble(message);
+    appendChatMessage({
+      id: `local-${Date.now()}`,
+      sender: localName,
+      message,
+      mine: true,
+      at: Date.now(),
+    });
 
     const channel = roomChannelRef.current;
     if (!channel) return;
@@ -389,12 +577,13 @@ const App = () => {
       event: 'chat',
       payload: {
         userId: user.id,
+        presenceKey: localPresenceKeyRef.current,
         name: localName,
         message,
         sentAt: Date.now(),
       },
     });
-  }, [catRecord?.name, user]);
+  }, [appendChatMessage, catRecord?.name, user]);
 
   const handleChatSubmit = async (event) => {
     event.preventDefault();
@@ -409,18 +598,22 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (!supabase || screen !== SCREEN.ROOM || !user) return undefined;
+    if (!supabase || screen !== SCREEN.ROOM || !user || tabBlocked) return undefined;
 
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
+    const localPresenceKey = `${user.id}:${tabIdRef.current}`;
+    localPresenceKeyRef.current = `${localPresenceKey}:0`;
 
     const channel = supabase.channel(ROOM_CHANNEL, {
       config: {
-        presence: { key: user.id },
+        presence: { key: localPresenceKey },
       },
     });
 
     roomChannelRef.current = channel;
     localPresenceRef.current = {
+      userId: user.id,
+      presenceKey: localPresenceKey,
       name: localName,
       x: CONFIG.WIDTH / 2,
       y: CONFIG.FLOOR_Y,
@@ -435,10 +628,24 @@ const App = () => {
     channel.on('broadcast', { event: 'chat' }, (event) => {
       const payload = event?.payload || event || {};
       const fromId = typeof payload.userId === 'string' ? payload.userId : null;
+      const fromPresenceKey = typeof payload.presenceKey === 'string' ? `${payload.presenceKey}:0` : null;
       const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+      const sender = typeof payload.name === 'string' ? payload.name : 'Cat player';
 
-      if (!fromId || !message || fromId === user.id) return;
-      gameRef.current?.setRemoteChatBubble(fromId, message);
+      if (!message) return;
+      if (fromPresenceKey && fromPresenceKey === localPresenceKeyRef.current) return;
+
+      const bubbleId = fromPresenceKey || fromId;
+      if (!bubbleId) return;
+
+      appendChatMessage({
+        id: `remote-${Date.now()}-${bubbleId}`,
+        sender,
+        message,
+        mine: false,
+        at: Date.now(),
+      });
+      gameRef.current?.setRemoteChatBubble(bubbleId, message);
     });
 
     channel.subscribe(async (status) => {
@@ -454,15 +661,21 @@ const App = () => {
       setOnlinePlayers([]);
       roomChannelRef.current = null;
       localPresenceRef.current = null;
+      localPresenceKeyRef.current = '';
       supabase.removeChannel(channel);
     };
-  }, [screen, user, catRecord?.name]);
+  }, [screen, user, catRecord?.name, appendChatMessage, tabBlocked]);
+
+  useEffect(() => {
+    if (screen === SCREEN.ROOM) return;
+    setChatMessages([]);
+  }, [screen]);
 
   if (screen === SCREEN.LOADING) {
     return withBackground(
       <div style={styles.centeredWrapper}>
         <div style={styles.card}>
-          <h1 style={styles.h1}>Loading Cat Game</h1>
+          <h1 style={styles.h1}>Loading Pawland</h1>
           <p style={styles.p}>Preparing your profile and room state...</p>
         </div>
       </div>
@@ -576,6 +789,9 @@ const App = () => {
           <button type="button" style={styles.secondaryBtn} onClick={goToEditor}>
             Edit cat
           </button>
+          <button type="button" style={styles.secondaryBtn} onClick={copyRoomLink}>
+            {roomLinkCopied ? 'Copied room link' : 'Copy room link'}
+          </button>
           <button type="button" style={styles.ghostBtn} onClick={handleLogout} disabled={busy}>
             Logout
           </button>
@@ -583,7 +799,7 @@ const App = () => {
       </div>
 
       <div style={styles.canvasWrapper}>
-        <canvas ref={canvasRef} style={{ display: 'block', width: '100%' }} />
+        <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
       </div>
 
       <div style={styles.helpRow}>
@@ -593,20 +809,16 @@ const App = () => {
         <span style={styles.hint}>Jump</span>
         <span style={styles.key}>Ctrl</span>
         <span style={styles.hint}>Sit</span>
-        <span style={styles.key}>Ctrl + T</span>
+        <span style={styles.key}>T</span>
         <span style={styles.hint}>Chat</span>
       </div>
 
-      <div style={styles.chatRow}>
-        <button
-          type="button"
-          style={styles.secondaryBtn}
-          onClick={() => setChatOpen((prev) => !prev)}
-        >
-          {chatOpen ? 'Close chat' : 'Open chat'}
-        </button>
-        <span style={styles.chatHint}>Messages appear as speech bubbles above characters.</span>
-      </div>
+      {tabBlocked ? (
+        <div style={styles.tabBlockedCard}>
+          <strong>This game is active in another tab.</strong>
+          <span style={styles.tabBlockedText}>Keep that tab open for gameplay. This tab is read-only to avoid reboot loops.</span>
+        </div>
+      ) : null}
 
       {chatOpen ? (
         <form style={styles.chatForm} onSubmit={handleChatSubmit}>
@@ -629,10 +841,21 @@ const App = () => {
         </form>
       ) : null}
 
+      <div style={styles.chatPool}>
+        {chatMessages.length === 0 ? (
+          <span style={styles.chatPoolEmpty}>No messages yet. Press T to open chat.</span>
+        ) : chatMessages.map((item) => (
+          <div key={item.id} style={{ ...styles.chatPoolItem, ...(item.mine ? styles.chatPoolItemMine : null) }}>
+            <strong style={styles.chatPoolSender}>{item.sender}</strong>
+            <span style={styles.chatPoolMessage}>{item.message}</span>
+          </div>
+        ))}
+      </div>
+
       {remotePlayers.length > 0 ? (
         <div style={styles.onlineList}>
           {remotePlayers.map((player) => (
-            <span key={player.userId} style={styles.onlineItem}>
+            <span key={player.presenceKey || player.userId} style={styles.onlineItem}>
               {player.name}
             </span>
           ))}
@@ -759,6 +982,7 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: 12,
+    overflowY: 'auto',
   },
   roomHeader: {
     maxWidth: 980,
@@ -787,6 +1011,8 @@ const styles = {
     boxShadow: '0 0 40px rgba(80,80,200,0.15)',
     width: '100%',
     maxWidth: 980,
+    aspectRatio: '16 / 10',
+    maxHeight: '64vh',
     margin: '0 auto',
     lineHeight: 0,
     background: '#0e1320',
@@ -830,19 +1056,6 @@ const styles = {
     padding: '4px 10px',
     fontSize: 12,
   },
-  chatRow: {
-    maxWidth: 980,
-    width: '100%',
-    margin: '0 auto',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-    flexWrap: 'wrap',
-  },
-  chatHint: {
-    fontSize: 12,
-    color: 'rgba(216, 237, 255, 0.72)',
-  },
   chatForm: {
     maxWidth: 980,
     width: '100%',
@@ -860,6 +1073,65 @@ const styles = {
     background: 'rgba(6, 16, 26, 0.9)',
     color: '#dff6ff',
     fontSize: 14,
+  },
+  tabBlockedCard: {
+    maxWidth: 980,
+    width: '100%',
+    margin: '0 auto',
+    borderRadius: 10,
+    border: '1px solid rgba(255, 216, 170, 0.35)',
+    background: 'rgba(66, 42, 14, 0.35)',
+    color: '#ffe7c7',
+    padding: '10px 12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  tabBlockedText: {
+    fontSize: 12,
+    opacity: 0.9,
+  },
+  chatPool: {
+    maxWidth: 980,
+    width: '100%',
+    margin: '0 auto',
+    border: '1px solid rgba(255,255,255,0.16)',
+    borderRadius: 10,
+    background: 'rgba(5, 13, 24, 0.65)',
+    padding: 8,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    maxHeight: 180,
+    overflowY: 'auto',
+  },
+  chatPoolEmpty: {
+    fontSize: 12,
+    opacity: 0.7,
+    padding: '4px 2px',
+  },
+  chatPoolItem: {
+    borderRadius: 8,
+    border: '1px solid rgba(255,255,255,0.12)',
+    background: 'rgba(255,255,255,0.05)',
+    padding: '6px 8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  chatPoolItemMine: {
+    border: '1px solid rgba(125, 228, 255, 0.32)',
+    background: 'rgba(125, 228, 255, 0.1)',
+  },
+  chatPoolSender: {
+    fontSize: 11,
+    opacity: 0.86,
+  },
+  chatPoolMessage: {
+    fontSize: 13,
+    color: '#eef8ff',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
   },
   editorTopBar: {
     width: '100%',
