@@ -17,8 +17,10 @@ const SCREEN = {
 const CHAT_MAX_LENGTH = 120;
 const CHAT_POOL_LIMIT = 40;
 const PRESENCE_STALE_AFTER_MS = 15000;
-const REMOTE_BROADCAST_STALE_AFTER_MS = 8000;
+const REMOTE_BROADCAST_STALE_AFTER_MS = 20000;
 const PRESENCE_TRACK_INTERVAL_MS = 1400;
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 3000;
+const REALTIME_RESTART_COOLDOWN_MS = 1800;
 const LOAD_DATA_TIMEOUT_MS = 16000;
 const DEFAULT_SCENE_ROOM = 'courtyard';
 
@@ -209,6 +211,7 @@ const App = () => {
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
   const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 });
   const [musicBlocked, setMusicBlocked] = useState(false);
+  const [realtimeRestartNonce, setRealtimeRestartNonce] = useState(0);
   const [sceneInfo, setSceneInfo] = useState({
     id: DEFAULT_SCENE_ROOM,
     title: 'Courtyard',
@@ -221,6 +224,7 @@ const App = () => {
   const localPresenceRef = useRef(null);
   const localPresenceKeyRef = useRef('');
   const lastPresenceTrackAtRef = useRef(0);
+  const lastRealtimeRestartAtRef = useRef(0);
   const chatInputRef = useRef(null);
   const tabIdRef = useRef(createTabId());
   const roomLinkResetTimerRef = useRef(null);
@@ -234,9 +238,19 @@ const App = () => {
   const pendingThemeSrcRef = useRef(null);
   const activeThemeSrcRef = useRef(null);
 
-  const isAndroidDevice = useMemo(() => {
-    if (typeof navigator === 'undefined') return false;
-    return /Android/i.test(navigator.userAgent || '');
+  const isMobileDevice = useMemo(() => {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+
+    const ua = navigator.userAgent || '';
+    const isMobileUa = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    const hasTouchPoints = Number(navigator.maxTouchPoints || 0) > 0;
+    const hasCoarsePointer = window.matchMedia?.('(pointer: coarse)')?.matches || false;
+
+    return isMobileUa || hasTouchPoints || hasCoarsePointer;
+  }, []);
+
+  const supportsPointerEvents = useMemo(() => {
+    return typeof window !== 'undefined' && 'PointerEvent' in window;
   }, []);
 
   const releaseJumpKey = useCallback(() => {
@@ -342,12 +356,14 @@ const App = () => {
     releaseHorizontalMoveKeys();
   }, [releaseHorizontalMoveKeys]);
 
-  const updateJoystickFromPointer = useCallback((event) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+  const updateJoystickFromClientPoint = useCallback((clientX, clientY, target) => {
+    if (!target) return;
+
+    const rect = target.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    const rawX = event.clientX - centerX;
-    const rawY = event.clientY - centerY;
+    const rawX = clientX - centerX;
+    const rawY = clientY - centerY;
     const distance = Math.hypot(rawX, rawY);
 
     let dx = rawX;
@@ -370,51 +386,106 @@ const App = () => {
   }, [releaseHorizontalMoveKeys]);
 
   const handleJoystickDown = useCallback((event) => {
-    if (!isAndroidDevice) return;
+    if (!isMobileDevice) return;
     if (joystickPointerIdRef.current !== null) return;
     event.preventDefault();
     event.stopPropagation();
-    joystickPointerIdRef.current = event.pointerId;
+    joystickPointerIdRef.current = `pointer-${event.pointerId}`;
     joystickActiveRef.current = true;
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    updateJoystickFromPointer(event);
-  }, [isAndroidDevice, updateJoystickFromPointer]);
+    updateJoystickFromClientPoint(event.clientX, event.clientY, event.currentTarget);
+  }, [isMobileDevice, updateJoystickFromClientPoint]);
 
   const handleJoystickMove = useCallback((event) => {
     if (!joystickActiveRef.current) return;
-    if (event.pointerId !== joystickPointerIdRef.current) return;
+    if (`pointer-${event.pointerId}` !== joystickPointerIdRef.current) return;
     event.preventDefault();
     event.stopPropagation();
-    updateJoystickFromPointer(event);
-  }, [updateJoystickFromPointer]);
+    updateJoystickFromClientPoint(event.clientX, event.clientY, event.currentTarget);
+  }, [updateJoystickFromClientPoint]);
 
   const handleJoystickUp = useCallback((event) => {
     if (!joystickActiveRef.current) return;
-    if (event.pointerId !== joystickPointerIdRef.current) return;
+    if (`pointer-${event.pointerId}` !== joystickPointerIdRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     stopJoystick();
   }, [stopJoystick]);
 
+  const handleJoystickTouchStart = useCallback((event) => {
+    if (!isMobileDevice || supportsPointerEvents) return;
+    if (joystickPointerIdRef.current !== null) return;
+
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
+    if (!touch) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    joystickPointerIdRef.current = `touch-${touch.identifier}`;
+    joystickActiveRef.current = true;
+    updateJoystickFromClientPoint(touch.clientX, touch.clientY, event.currentTarget);
+  }, [isMobileDevice, supportsPointerEvents, updateJoystickFromClientPoint]);
+
+  const handleJoystickTouchMove = useCallback((event) => {
+    if (!isMobileDevice || supportsPointerEvents) return;
+    if (!joystickActiveRef.current) return;
+
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
+    if (!touch) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    updateJoystickFromClientPoint(touch.clientX, touch.clientY, event.currentTarget);
+  }, [isMobileDevice, supportsPointerEvents, updateJoystickFromClientPoint]);
+
+  const handleJoystickTouchEnd = useCallback((event) => {
+    if (!isMobileDevice || supportsPointerEvents) return;
+    if (!joystickActiveRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stopJoystick();
+  }, [isMobileDevice, supportsPointerEvents, stopJoystick]);
+
   const handleMobileJumpDown = useCallback((event) => {
-    if (!isAndroidDevice) return;
+    if (!isMobileDevice) return;
     if (jumpPointerIdRef.current !== null) return;
     event.preventDefault();
     event.stopPropagation();
-    jumpPointerIdRef.current = event.pointerId;
+    jumpPointerIdRef.current = `pointer-${event.pointerId}`;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     window.__catVirtualKeys?.pressKey('KeyW');
-  }, [isAndroidDevice]);
+  }, [isMobileDevice]);
 
   const handleMobileJumpUp = useCallback((event) => {
     if (jumpPointerIdRef.current === null) return;
-    if (event.pointerId !== jumpPointerIdRef.current) return;
+    if (`pointer-${event.pointerId}` !== jumpPointerIdRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     releaseJumpKey();
   }, [releaseJumpKey]);
+
+  const handleMobileJumpTouchDown = useCallback((event) => {
+    if (!isMobileDevice || supportsPointerEvents) return;
+    if (jumpPointerIdRef.current !== null) return;
+
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
+    if (!touch) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    jumpPointerIdRef.current = `touch-${touch.identifier}`;
+    window.__catVirtualKeys?.pressKey('KeyW');
+  }, [isMobileDevice, supportsPointerEvents]);
+
+  const handleMobileJumpTouchUp = useCallback((event) => {
+    if (!isMobileDevice || supportsPointerEvents) return;
+    if (jumpPointerIdRef.current === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    releaseJumpKey();
+  }, [isMobileDevice, supportsPointerEvents, releaseJumpKey]);
 
   const handleMobileSit = useCallback((event) => {
     event.preventDefault();
@@ -432,6 +503,16 @@ const App = () => {
     });
   }, []);
 
+  const handleMobileSitTouch = useCallback((event) => {
+    if (supportsPointerEvents) return;
+    handleMobileSit(event);
+  }, [handleMobileSit, supportsPointerEvents]);
+
+  const handleMobileChatTouch = useCallback((event) => {
+    if (supportsPointerEvents) return;
+    handleMobileChat(event);
+  }, [handleMobileChat, supportsPointerEvents]);
+
   const handleJoystickCaptureLost = useCallback(() => {
     stopJoystick();
   }, [stopJoystick]);
@@ -439,6 +520,17 @@ const App = () => {
   const handleMobileJumpCaptureLost = useCallback(() => {
     releaseJumpKey();
   }, [releaseJumpKey]);
+
+  const requestRealtimeRestart = useCallback((reason = 'unknown') => {
+    const now = Date.now();
+    if (now - lastRealtimeRestartAtRef.current < REALTIME_RESTART_COOLDOWN_MS) {
+      return;
+    }
+
+    lastRealtimeRestartAtRef.current = now;
+    console.warn(`[Realtime] Restart requested (${reason})`);
+    setRealtimeRestartNonce((prev) => prev + 1);
+  }, []);
 
   const copyRoomLink = useCallback(async () => {
     const url = new URL(window.location.href);
@@ -763,11 +855,15 @@ const App = () => {
           type: 'broadcast',
           event: 'state',
           payload: nextPresence,
-        }).catch(() => {});
+        }).catch(() => {
+          requestRealtimeRestart('state-send-failed');
+        });
 
         if (now - lastPresenceTrackAtRef.current >= PRESENCE_TRACK_INTERVAL_MS) {
           lastPresenceTrackAtRef.current = now;
-          channel.track(nextPresence).catch(() => {});
+          channel.track(nextPresence).catch(() => {
+            requestRealtimeRestart('presence-track-failed');
+          });
         }
       },
       onSceneChanged: (nextScene) => {
@@ -801,7 +897,7 @@ const App = () => {
         gameRef.current = null;
       }
     };
-  }, [appendChatMessage, screen]);
+  }, [appendChatMessage, requestRealtimeRestart, screen]);
 
   useEffect(() => {
     if (!gameRef.current || !skinCanvases) return;
@@ -876,7 +972,7 @@ const App = () => {
   }, [chatOpen]);
 
   useEffect(() => {
-    if (!isAndroidDevice) return undefined;
+    if (!isMobileDevice) return undefined;
 
     const releaseMobileInputs = () => {
       stopJoystick();
@@ -898,7 +994,7 @@ const App = () => {
       window.removeEventListener('pagehide', releaseMobileInputs);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [isAndroidDevice, releaseJumpKey, stopJoystick]);
+  }, [isMobileDevice, releaseJumpKey, stopJoystick]);
 
   useEffect(() => {
     if (screen === SCREEN.ROOM) return;
@@ -1070,9 +1166,13 @@ const App = () => {
         return;
       }
 
-      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR') {
-        supabase.realtime.connect();
-        trackPresence();
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        requestRealtimeRestart(`channel-${String(status || '').toLowerCase()}`);
+        return;
+      }
+
+      if (status === 'SUBSCRIPTION_ERROR') {
+        requestRealtimeRestart('subscription-error');
       }
     });
 
@@ -1082,11 +1182,27 @@ const App = () => {
       trackPresence();
     };
 
+    const heartbeatTimer = window.setInterval(() => {
+      if (document.hidden) return;
+      trackPresence();
+    }, PRESENCE_HEARTBEAT_INTERVAL_MS);
+
+    const pruneBroadcastTimer = window.setInterval(() => {
+      const now = Date.now();
+      setBroadcastPlayers((prev) => prev.filter((player) => {
+        const updatedAt = Number(player?.updatedAt);
+        if (!Number.isFinite(updatedAt)) return false;
+        return now - updatedAt <= REMOTE_BROADCAST_STALE_AFTER_MS;
+      }));
+    }, 1500);
+
     document.addEventListener('visibilitychange', refreshRealtime);
     window.addEventListener('online', refreshRealtime);
 
     return () => {
       isDisposed = true;
+      window.clearInterval(heartbeatTimer);
+      window.clearInterval(pruneBroadcastTimer);
       document.removeEventListener('visibilitychange', refreshRealtime);
       window.removeEventListener('online', refreshRealtime);
       setOnlinePlayers([]);
@@ -1097,13 +1213,36 @@ const App = () => {
       lastPresenceTrackAtRef.current = 0;
       supabase.removeChannel(channel);
     };
-  }, [screen, user, catRecord?.name, appendChatMessage]);
+  }, [screen, user, catRecord?.name, appendChatMessage, requestRealtimeRestart, realtimeRestartNonce]);
 
   useEffect(() => {
     if (screen === SCREEN.ROOM) return;
     setBroadcastPlayers([]);
     setChatMessages([]);
   }, [screen]);
+
+  const roomWrapperStyle = useMemo(() => {
+    if (!isMobileDevice) return styles.roomWrapper;
+
+    return {
+      ...styles.roomWrapper,
+      padding: '10px',
+      paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
+      gap: 10,
+    };
+  }, [isMobileDevice]);
+
+  const canvasWrapperStyle = useMemo(() => {
+    if (!isMobileDevice) return styles.canvasWrapper;
+
+    return {
+      ...styles.canvasWrapper,
+      aspectRatio: '4 / 3',
+      maxHeight: '58dvh',
+      minHeight: 260,
+      borderRadius: 10,
+    };
+  }, [isMobileDevice]);
 
   if (screen === SCREEN.LOADING) {
     return withBackground(
@@ -1221,7 +1360,7 @@ const App = () => {
   }
 
   return withBackground(
-    <div style={styles.roomWrapper}>
+    <div style={roomWrapperStyle}>
       <div style={styles.roomHeader}>
         <div>
           <h1 style={styles.roomTitle}>Room: {ROOM_NAME}</h1>
@@ -1250,11 +1389,14 @@ const App = () => {
         </div>
       </div>
 
-      <div style={styles.canvasWrapper}>
-        <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
+      <div style={canvasWrapperStyle}>
+        <canvas
+          ref={canvasRef}
+          style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none' }}
+        />
       </div>
 
-      {!isAndroidDevice ? (
+      {!isMobileDevice ? (
         <div style={styles.helpRow}>
           <span style={styles.key}>A / D</span>
           <span style={styles.hint}>Move</span>
@@ -1277,6 +1419,10 @@ const App = () => {
             onPointerCancel={handleJoystickUp}
             onPointerLeave={handleJoystickUp}
             onLostPointerCapture={handleJoystickCaptureLost}
+            onTouchStart={handleJoystickTouchStart}
+            onTouchMove={handleJoystickTouchMove}
+            onTouchEnd={handleJoystickTouchEnd}
+            onTouchCancel={handleJoystickTouchEnd}
           >
             <div
               style={{
@@ -1295,6 +1441,9 @@ const App = () => {
               onPointerCancel={handleMobileJumpUp}
               onPointerLeave={handleMobileJumpUp}
               onLostPointerCapture={handleMobileJumpCaptureLost}
+              onTouchStart={handleMobileJumpTouchDown}
+              onTouchEnd={handleMobileJumpTouchUp}
+              onTouchCancel={handleMobileJumpTouchUp}
             >
               ^
             </button>
@@ -1302,6 +1451,7 @@ const App = () => {
               type="button"
               style={styles.mobileControlBtn}
               onPointerDown={handleMobileSit}
+              onTouchStart={handleMobileSitTouch}
             >
               v
             </button>
@@ -1309,6 +1459,7 @@ const App = () => {
               type="button"
               style={styles.mobileChatBtn}
               onPointerDown={handleMobileChat}
+              onTouchStart={handleMobileChatTouch}
             >
               C
             </button>
@@ -1340,7 +1491,7 @@ const App = () => {
       <div style={styles.chatPool}>
         {chatMessages.length === 0 ? (
           <span style={styles.chatPoolEmpty}>
-            {isAndroidDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
+            {isMobileDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
           </span>
         ) : chatMessages.map((item) => (
           <div key={item.id} style={{ ...styles.chatPoolItem, ...(item.mine ? styles.chatPoolItemMine : null) }}>
@@ -1472,10 +1623,11 @@ const styles = {
     color: '#ffb8b8',
   },
   roomWrapper: {
-    minHeight: '100vh',
+    minHeight: '100dvh',
     background: 'transparent',
     color: '#edf0ff',
     padding: 14,
+    paddingBottom: 'max(14px, env(safe-area-inset-bottom))',
     boxSizing: 'border-box',
     display: 'flex',
     flexDirection: 'column',
@@ -1522,7 +1674,7 @@ const styles = {
     width: '100%',
     maxWidth: 980,
     aspectRatio: '16 / 10',
-    maxHeight: '64vh',
+    maxHeight: '64dvh',
     margin: '0 auto',
     lineHeight: 0,
     background: '#0e1320',

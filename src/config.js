@@ -8,6 +8,8 @@
 const BASE_WIDTH = 800;
 const BASE_HEIGHT = 500;
 const FLOOR_RATIO = 0.88;
+const MOBILE_FLOOR_RATIO = 0.83;
+const MOBILE_VIEWPORT_BREAKPOINT = 820;
 
 export const CONFIG = {
   // ── Canvas ────────────────────────────────────────────────────
@@ -58,8 +60,9 @@ export const CONFIG = {
 export function setViewportSize(width, height) {
   const nextWidth = Math.max(640, Math.round(Number(width) || BASE_WIDTH));
   const nextHeight = Math.max(400, Math.round(Number(height) || BASE_HEIGHT));
+  const floorRatio = nextWidth <= MOBILE_VIEWPORT_BREAKPOINT ? MOBILE_FLOOR_RATIO : FLOOR_RATIO;
 
   CONFIG.WIDTH = nextWidth;
   CONFIG.HEIGHT = nextHeight;
-  CONFIG.FLOOR_Y = Math.round(nextHeight * FLOOR_RATIO);
+  CONFIG.FLOOR_Y = Math.round(nextHeight * floorRatio);
 }

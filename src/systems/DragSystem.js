@@ -49,6 +49,8 @@ export class DragSystem extends System {
     this._app.stage.interactive = true;
     this._app.stage.on('pointermove', this._onMove);
     this._app.stage.on('pointerup',   this._onUp);
+    this._app.stage.on('pointerupoutside', this._onUp);
+    this._app.stage.on('pointercancel', this._onUp);
     console.log('[DragSystem] Stage pointer events registered');
   }
 
@@ -155,5 +157,7 @@ export class DragSystem extends System {
   destroy() {
     this._app.stage.off('pointermove', this._onMove);
     this._app.stage.off('pointerup',   this._onUp);
+    this._app.stage.off('pointerupoutside', this._onUp);
+    this._app.stage.off('pointercancel', this._onUp);
   }
 }

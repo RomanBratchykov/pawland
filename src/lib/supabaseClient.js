@@ -52,7 +52,7 @@ function createSupabaseClient() {
     },
     realtime: {
       params: {
-        eventsPerSecond: 10,
+        eventsPerSecond: 30,
       },
     },
   });

@@ -38,6 +38,9 @@ const DEFAULT_SCENE_ROOM = 'courtyard';
 const SCENE_EDGE_THRESHOLD_PX = 6;
 const SCENE_TRANSITION_COOLDOWN_MS = 520;
 const INTERACT_DISTANCE_PX = 102;
+const REMOTE_INTERPOLATION_FACTOR = 0.28;
+const REMOTE_SNAP_DISTANCE_PX = 240;
+const REMOTE_MOVE_HOLD_MS = 220;
 
 const SCENE_ROOMS = {
   courtyard: {
@@ -177,7 +180,8 @@ export class Game {
     this._onInteract = typeof options.onInteract === 'function'
       ? options.onInteract
       : null;
-    this._emitStateEveryMs = 120;
+    this._showRemoteAcrossRooms = options.showRemoteAcrossRooms !== false;
+    this._emitStateEveryMs = 70;
     this._emitStateClock = 0;
     this._remotePlayers = new Map();
     this._pendingRemotePlayers = [];
@@ -253,6 +257,7 @@ export class Game {
           this._world.tick(delta);
           this._updateSceneFlow();
           this._tickLocalState();
+          this._tickRemotePlayers();
         });
         console.log('[Game] Ready!');
 
@@ -527,7 +532,38 @@ export class Game {
 
   _refreshRemoteVisibility() {
     for (const entry of this._remotePlayers.values()) {
-      entry.container.visible = (entry.sceneRoom || DEFAULT_SCENE_ROOM) === this._sceneRoomId;
+      entry.container.visible = this._isRemoteVisible(entry.sceneRoom || DEFAULT_SCENE_ROOM);
+    }
+  }
+
+  _isRemoteVisible(sceneRoom) {
+    return this._showRemoteAcrossRooms || sceneRoom === this._sceneRoomId;
+  }
+
+  _tickRemotePlayers() {
+    if (this._remotePlayers.size === 0) return;
+
+    const now = Date.now();
+
+    for (const entry of this._remotePlayers.values()) {
+      const dx = entry.targetX - entry.container.x;
+      const dy = entry.targetY - entry.container.y;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance > REMOTE_SNAP_DISTANCE_PX) {
+        entry.container.x = entry.targetX;
+        entry.container.y = entry.targetY;
+      } else if (distance > 0.01) {
+        entry.container.x += dx * REMOTE_INTERPOLATION_FACTOR;
+        entry.container.y += dy * REMOTE_INTERPOLATION_FACTOR;
+      }
+
+      const isMoving = distance > 0.65 || now < entry.movementHoldUntil;
+      const wantedAnim = isMoving ? CONFIG.ANIM.WALK : CONFIG.ANIM.STAND;
+      if (entry.currentAnim !== wantedAnim) {
+        entry.spine.state.setAnimation(0, wantedAnim, true);
+        entry.currentAnim = wantedAnim;
+      }
     }
   }
 
@@ -555,6 +591,8 @@ export class Game {
     const container = new PIXI.Container();
     const spine = new Spine(this._skeletonData);
     const baseScale = 0.5;
+    const initialX = Number.isFinite(player?.x) ? player.x : CONFIG.WIDTH / 2;
+    const initialY = Number.isFinite(player?.y) ? player.y : CONFIG.FLOOR_Y;
 
     spine.scale.set(baseScale);
     spine.interactive = false;
@@ -573,6 +611,8 @@ export class Game {
 
     container.addChild(spine);
     container.addChild(label);
+    container.x = initialX;
+    container.y = initialY;
     this._app.stage.addChild(container);
 
     return {
@@ -582,8 +622,11 @@ export class Game {
       baseScale,
       currentAnim: CONFIG.ANIM.STAND,
       sceneRoom: typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM,
-      lastX: Number.isFinite(player?.x) ? player.x : CONFIG.WIDTH / 2,
-      lastY: Number.isFinite(player?.y) ? player.y : CONFIG.FLOOR_Y,
+      lastX: initialX,
+      lastY: initialY,
+      targetX: initialX,
+      targetY: initialY,
+      movementHoldUntil: 0,
     };
   }
 
@@ -667,18 +710,15 @@ export class Game {
     const facingRight = player?.facingRight !== false;
     const sceneRoom = typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM;
     entry.sceneRoom = sceneRoom;
-    entry.container.visible = sceneRoom === this._sceneRoomId;
+    entry.container.visible = this._isRemoteVisible(sceneRoom);
 
-    const moved = Math.abs(nextX - entry.lastX) > 0.6 || Math.abs(nextY - entry.lastY) > 0.6;
-    const wantedAnim = moved ? CONFIG.ANIM.WALK : CONFIG.ANIM.STAND;
-
-    if (entry.currentAnim !== wantedAnim) {
-      entry.spine.state.setAnimation(0, wantedAnim, true);
-      entry.currentAnim = wantedAnim;
+    const movementDistance = Math.hypot(nextX - entry.lastX, nextY - entry.lastY);
+    if (movementDistance > 0.45) {
+      entry.movementHoldUntil = Date.now() + REMOTE_MOVE_HOLD_MS;
     }
 
-    entry.container.x = nextX;
-    entry.container.y = nextY;
+    entry.targetX = nextX;
+    entry.targetY = nextY;
     entry.spine.scale.x = entry.baseScale * (facingRight ? 1 : -1);
     entry.spine.scale.y = entry.baseScale;
     entry.label.text = player?.name || 'Player';
