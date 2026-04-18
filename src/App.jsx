@@ -26,6 +26,8 @@ const ROOM_NAME =
 const ROOM_CHANNEL = `cat-room-${ROOM_NAME}`;
 
 const DECOR_IMAGES = ['/assets/heart.png', '/assets/star.png'];
+const JOYSTICK_RANGE_PX = 36;
+const JOYSTICK_DEAD_ZONE_PX = 12;
 
 function createTabId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -161,6 +163,7 @@ const App = () => {
   const [chatText, setChatText] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
+  const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 });
 
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
@@ -173,6 +176,12 @@ const App = () => {
   const screenRef = useRef(SCREEN.LOADING);
   const userRef = useRef(null);
   const lastLoadedUserRef = useRef(null);
+  const joystickActiveRef = useRef(false);
+
+  const isAndroidDevice = useMemo(() => {
+    if (typeof navigator === 'undefined') return false;
+    return /Android/i.test(navigator.userAgent || '');
+  }, []);
 
   const withBackground = (content) => (
     <div className="app-bg-shell">
@@ -185,6 +194,102 @@ const App = () => {
     setChatMessages((prev) => {
       const next = [...prev, item];
       return next.length > CHAT_POOL_LIMIT ? next.slice(next.length - CHAT_POOL_LIMIT) : next;
+    });
+  }, []);
+
+  const releaseHorizontalMoveKeys = useCallback(() => {
+    const virtualKeys = window.__catVirtualKeys;
+    if (!virtualKeys) return;
+    virtualKeys.releaseKey('KeyA');
+    virtualKeys.releaseKey('KeyD');
+  }, []);
+
+  const syncHorizontalMoveKeys = useCallback((deltaX) => {
+    const virtualKeys = window.__catVirtualKeys;
+    if (!virtualKeys) return;
+
+    if (deltaX <= -JOYSTICK_DEAD_ZONE_PX) {
+      virtualKeys.pressKey('KeyA');
+      virtualKeys.releaseKey('KeyD');
+      return;
+    }
+
+    if (deltaX >= JOYSTICK_DEAD_ZONE_PX) {
+      virtualKeys.pressKey('KeyD');
+      virtualKeys.releaseKey('KeyA');
+      return;
+    }
+
+    releaseHorizontalMoveKeys();
+  }, [releaseHorizontalMoveKeys]);
+
+  const updateJoystickFromPointer = useCallback((event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const rawX = event.clientX - centerX;
+    const rawY = event.clientY - centerY;
+    const distance = Math.hypot(rawX, rawY);
+
+    let dx = rawX;
+    let dy = rawY;
+    if (distance > JOYSTICK_RANGE_PX && distance > 0.001) {
+      const k = JOYSTICK_RANGE_PX / distance;
+      dx = rawX * k;
+      dy = rawY * k;
+    }
+
+    setJoystickOffset({ x: dx, y: dy });
+    syncHorizontalMoveKeys(dx);
+  }, [syncHorizontalMoveKeys]);
+
+  const stopJoystick = useCallback(() => {
+    joystickActiveRef.current = false;
+    setJoystickOffset({ x: 0, y: 0 });
+    releaseHorizontalMoveKeys();
+  }, [releaseHorizontalMoveKeys]);
+
+  const handleJoystickDown = useCallback((event) => {
+    if (!isAndroidDevice) return;
+    event.preventDefault();
+    joystickActiveRef.current = true;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    updateJoystickFromPointer(event);
+  }, [isAndroidDevice, updateJoystickFromPointer]);
+
+  const handleJoystickMove = useCallback((event) => {
+    if (!joystickActiveRef.current) return;
+    event.preventDefault();
+    updateJoystickFromPointer(event);
+  }, [updateJoystickFromPointer]);
+
+  const handleJoystickUp = useCallback((event) => {
+    if (!joystickActiveRef.current) return;
+    event.preventDefault();
+    stopJoystick();
+  }, [stopJoystick]);
+
+  const handleMobileJumpDown = useCallback((event) => {
+    event.preventDefault();
+    window.__catVirtualKeys?.pressKey('KeyW');
+  }, []);
+
+  const handleMobileJumpUp = useCallback((event) => {
+    event.preventDefault();
+    window.__catVirtualKeys?.releaseKey('KeyW');
+  }, []);
+
+  const handleMobileSit = useCallback((event) => {
+    event.preventDefault();
+    window.__catSitToggle?.();
+  }, []);
+
+  const handleMobileChat = useCallback((event) => {
+    event.preventDefault();
+    setChatOpen((prev) => {
+      const next = !prev;
+      if (!next) setChatText('');
+      return next;
     });
   }, []);
 
@@ -536,6 +641,19 @@ const App = () => {
     chatInputRef.current?.focus();
   }, [chatOpen]);
 
+  useEffect(() => {
+    if (screen === SCREEN.ROOM) return;
+    stopJoystick();
+    window.__catVirtualKeys?.releaseKey('KeyW');
+  }, [screen, stopJoystick]);
+
+  useEffect(() => {
+    return () => {
+      stopJoystick();
+      window.__catVirtualKeys?.releaseKey('KeyW');
+    };
+  }, [stopJoystick]);
+
   const sendChatMessage = useCallback(async (rawText) => {
     if (!user) return;
 
@@ -814,16 +932,63 @@ const App = () => {
         <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
       </div>
 
-      <div style={styles.helpRow}>
-        <span style={styles.key}>A / D</span>
-        <span style={styles.hint}>Move</span>
-        <span style={styles.key}>W</span>
-        <span style={styles.hint}>Jump</span>
-        <span style={styles.key}>Ctrl</span>
-        <span style={styles.hint}>Sit</span>
-        <span style={styles.key}>T</span>
-        <span style={styles.hint}>Chat</span>
-      </div>
+      {!isAndroidDevice ? (
+        <div style={styles.helpRow}>
+          <span style={styles.key}>A / D</span>
+          <span style={styles.hint}>Move</span>
+          <span style={styles.key}>W</span>
+          <span style={styles.hint}>Jump</span>
+          <span style={styles.key}>Ctrl</span>
+          <span style={styles.hint}>Sit</span>
+          <span style={styles.key}>T</span>
+          <span style={styles.hint}>Chat</span>
+        </div>
+      ) : (
+        <div style={styles.mobileHud}>
+          <div
+            style={styles.joystickBase}
+            onPointerDown={handleJoystickDown}
+            onPointerMove={handleJoystickMove}
+            onPointerUp={handleJoystickUp}
+            onPointerCancel={handleJoystickUp}
+            onPointerLeave={handleJoystickUp}
+          >
+            <div
+              style={{
+                ...styles.joystickKnob,
+                transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)`,
+              }}
+            />
+          </div>
+
+          <div style={styles.mobileActionStack}>
+            <button
+              type="button"
+              style={styles.mobileControlBtn}
+              onPointerDown={handleMobileJumpDown}
+              onPointerUp={handleMobileJumpUp}
+              onPointerCancel={handleMobileJumpUp}
+              onPointerLeave={handleMobileJumpUp}
+            >
+              ^
+            </button>
+            <button
+              type="button"
+              style={styles.mobileControlBtn}
+              onPointerDown={handleMobileSit}
+            >
+              v
+            </button>
+            <button
+              type="button"
+              style={styles.mobileChatBtn}
+              onPointerDown={handleMobileChat}
+            >
+              C
+            </button>
+          </div>
+        </div>
+      )}
 
       {chatOpen ? (
         <form style={styles.chatForm} onSubmit={handleChatSubmit}>
@@ -848,7 +1013,9 @@ const App = () => {
 
       <div style={styles.chatPool}>
         {chatMessages.length === 0 ? (
-          <span style={styles.chatPoolEmpty}>No messages yet. Press T to open chat.</span>
+          <span style={styles.chatPoolEmpty}>
+            {isAndroidDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
+          </span>
         ) : chatMessages.map((item) => (
           <div key={item.id} style={{ ...styles.chatPoolItem, ...(item.mine ? styles.chatPoolItemMine : null) }}>
             <strong style={styles.chatPoolSender}>{item.sender}</strong>
@@ -1045,6 +1212,64 @@ const styles = {
     color: 'rgba(200,200,255,0.65)',
     fontSize: '0.8rem',
     marginRight: 8,
+  },
+  mobileHud: {
+    maxWidth: 980,
+    width: '100%',
+    margin: '0 auto',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    gap: 12,
+    touchAction: 'none',
+    userSelect: 'none',
+  },
+  joystickBase: {
+    width: 124,
+    height: 124,
+    borderRadius: '50%',
+    border: '2px solid rgba(148, 194, 255, 0.45)',
+    background: 'radial-gradient(circle at 35% 35%, rgba(255,255,255,0.14), rgba(46, 88, 144, 0.38) 68%)',
+    position: 'relative',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxShadow: 'inset 0 0 12px rgba(9, 22, 42, 0.42)',
+  },
+  joystickKnob: {
+    width: 54,
+    height: 54,
+    borderRadius: '50%',
+    border: '2px solid rgba(170, 230, 255, 0.72)',
+    background: 'radial-gradient(circle at 35% 30%, #c9f2ff, #4c9bd8 68%)',
+    boxShadow: '0 6px 14px rgba(0, 0, 0, 0.34)',
+    transition: 'transform 40ms linear',
+  },
+  mobileActionStack: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    gap: 10,
+    width: 'min(280px, calc(100% - 136px))',
+  },
+  mobileControlBtn: {
+    borderRadius: 14,
+    border: '1px solid rgba(158, 236, 255, 0.52)',
+    background: 'linear-gradient(160deg, rgba(94, 214, 255, 0.34), rgba(37, 92, 168, 0.4))',
+    color: '#ecfbff',
+    fontSize: 24,
+    fontWeight: 800,
+    minHeight: 58,
+    touchAction: 'none',
+  },
+  mobileChatBtn: {
+    borderRadius: 14,
+    border: '1px solid rgba(133, 255, 193, 0.58)',
+    background: 'linear-gradient(160deg, rgba(111, 255, 198, 0.34), rgba(42, 127, 141, 0.45))',
+    color: '#f1fff7',
+    fontSize: 22,
+    fontWeight: 800,
+    minHeight: 58,
+    touchAction: 'none',
   },
   onlineList: {
     maxWidth: 980,

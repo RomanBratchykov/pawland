@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { getFallbackSkeletonLayout, loadSkeletonLayout } from '../lib/skeletonLayout.js';
 
 const PART_SIZES = {
   head: [200, 200],
@@ -14,6 +15,13 @@ const PART_LABELS = {
   body: 'Body',
   leg: 'Paws',
   tail: 'Tail',
+};
+
+const SYSTEM_DEFAULT_BASENAME = {
+  head: 'head0',
+  body: 'body0',
+  leg: 'leg0',
+  tail: 'tail0',
 };
 
 const DEFAULT_KITTEN = {
@@ -47,10 +55,6 @@ function createEmptySelectedParts() {
   };
 }
 
-function hasAnyLibraryEntries(partLibrary) {
-  return PART_KEYS.some((partKey) => (partLibrary?.[partKey] || []).length > 0);
-}
-
 function clonePartLibrary(partLibrary) {
   const clone = createEmptyPartLibrary();
   PART_KEYS.forEach((partKey) => {
@@ -70,6 +74,7 @@ function sanitizePartLibrary(raw) {
         id: item.id,
         name: typeof item.name === 'string' ? item.name : 'Custom part',
         dataUrl: item.dataUrl,
+        isSystemDefault: Boolean(item.isSystemDefault),
       }));
   });
 
@@ -106,6 +111,10 @@ function fileNameFromPath(path) {
 
 function stripExtension(fileName) {
   return String(fileName || '').replace(/\.[^/.]+$/, '');
+}
+
+function normalizeBaseName(fileName) {
+  return stripExtension(String(fileName || '')).toLowerCase();
 }
 
 function inferPartKeyFromName(fileName) {
@@ -210,7 +219,8 @@ function canvasToCompressedDataUrl(canvas) {
 function createDefaultSelectedPartsFromLibrary(partLibrary) {
   const selected = createEmptySelectedParts();
   PART_KEYS.forEach((partKey) => {
-    selected[partKey] = partLibrary[partKey]?.[0]?.id || null;
+    const systemDefault = (partLibrary[partKey] || []).find((item) => item.isSystemDefault);
+    selected[partKey] = systemDefault?.id || partLibrary[partKey]?.[0]?.id || null;
   });
   return selected;
 }
@@ -228,15 +238,16 @@ function sanitizeSelectedParts(raw, partLibrary) {
       return;
     }
 
-    selected[partKey] = partLibrary[partKey]?.[0]?.id || null;
+    const systemDefault = (partLibrary[partKey] || []).find((item) => item.isSystemDefault);
+    selected[partKey] = systemDefault?.id || partLibrary[partKey]?.[0]?.id || null;
   });
 
   return selected;
 }
 
 function buildBundledDefaultPartLibrary() {
-  const library = createEmptyPartLibrary();
-  const counters = { head: 0, body: 0, leg: 0, tail: 0 };
+  const collected = createEmptyPartLibrary();
+  const counters = { head: 1, body: 1, leg: 1, tail: 1 };
 
   Object.entries(DEFAULT_PART_IMAGE_MODULES).forEach(([path, url]) => {
     if (typeof url !== 'string') return;
@@ -245,16 +256,24 @@ function buildBundledDefaultPartLibrary() {
     const partKey = inferPartKeyFromName(fileName);
     if (!partKey) return;
 
+    const normalizedBaseName = normalizeBaseName(fileName);
+    const isSystemDefault = normalizedBaseName === SYSTEM_DEFAULT_BASENAME[partKey];
     const index = counters[partKey]++;
-    library[partKey].push({
-      id: `bundled-${partKey}-${index}`,
+
+    collected[partKey].push({
+      id: isSystemDefault ? `system-default-${partKey}` : `bundled-${partKey}-${index}`,
       name: stripExtension(fileName).replace(/[-_]+/g, ' '),
       dataUrl: url,
+      isSystemDefault,
     });
   });
 
+  const library = createEmptyPartLibrary();
   PART_KEYS.forEach((partKey) => {
-    library[partKey].sort((a, b) => a.name.localeCompare(b.name));
+    const list = [...collected[partKey]].sort((a, b) => a.name.localeCompare(b.name));
+    const systemDefault = list.find((item) => item.isSystemDefault) || null;
+    const rest = list.filter((item) => !item.isSystemDefault);
+    library[partKey] = systemDefault ? [systemDefault, ...rest] : rest;
   });
 
   return library;
@@ -286,9 +305,6 @@ function loadInitialKitten(initialKitten = null) {
 function loadInitialPartLibrary(initialPartLibrary = null) {
   if (initialPartLibrary) {
     const fromInitial = sanitizePartLibrary(initialPartLibrary);
-    if (hasAnyLibraryEntries(fromInitial)) {
-      return fromInitial;
-    }
     return mergePartLibraries(fromInitial, BUNDLED_DEFAULT_PART_LIBRARY);
   }
 
@@ -300,10 +316,6 @@ function loadInitialPartLibrary(initialPartLibrary = null) {
 
     const parsed = JSON.parse(raw);
     const fromStorage = sanitizePartLibrary(parsed);
-    if (hasAnyLibraryEntries(fromStorage)) {
-      return fromStorage;
-    }
-
     return mergePartLibraries(fromStorage, BUNDLED_DEFAULT_PART_LIBRARY);
   } catch {
     return clonePartLibrary(BUNDLED_DEFAULT_PART_LIBRARY);
@@ -398,6 +410,20 @@ function CanvasPreview({ title, sourceCanvas, sourceLabel }) {
 
 function FullKittenPreview({ parts }) {
   const canvasRef = useRef(null);
+  const [layout, setLayout] = useState(() => getFallbackSkeletonLayout());
+
+  useEffect(() => {
+    let active = true;
+
+    loadSkeletonLayout().then((nextLayout) => {
+      if (!active || !nextLayout) return;
+      setLayout(nextLayout);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -438,18 +464,43 @@ function FullKittenPreview({ parts }) {
       ctx.restore();
     };
 
-    drawPartBox(parts.tail, { x: 120, y: 84, w: 110, h: 170, rotation: -0.45 });
-    drawPartBox(parts.leg, { x: 244, y: 168, w: 48, h: 96 });
-    drawPartBox(parts.leg, { x: 282, y: 168, w: 48, h: 96 });
-    drawPartBox(parts.body, { x: 206, y: 114, w: 180, h: 132 });
-    drawPartBox(parts.leg, { x: 322, y: 168, w: 48, h: 96 });
-    drawPartBox(parts.leg, { x: 358, y: 168, w: 48, h: 96 });
-    drawPartBox(parts.head, { x: 312, y: 60, w: 132, h: 126 });
+    const scale = 0.64;
+    const bodyW = layout.body.width * scale;
+    const bodyH = layout.body.height * scale;
+    const headW = layout.head.width * scale * 0.74;
+    const headH = layout.head.height * scale * 0.74;
+    const legW = layout.leg.width * scale * 0.8;
+    const legH = layout.leg.height * scale * 0.94;
+    const tailW = layout.tail.width * scale * 0.72;
+    const tailH = layout.tail.height * scale * 0.72;
+
+    const bodyX = 218;
+    const bodyY = 108;
+
+    drawPartBox(parts.tail, {
+      x: bodyX - tailW * 0.54,
+      y: bodyY + bodyH * 0.02,
+      w: tailW,
+      h: tailH,
+      rotation: -0.36,
+    });
+    drawPartBox(parts.leg, { x: bodyX + 22, y: bodyY + bodyH * 0.72, w: legW, h: legH });
+    drawPartBox(parts.leg, { x: bodyX + 58, y: bodyY + bodyH * 0.72, w: legW, h: legH });
+    drawPartBox(parts.body, { x: bodyX, y: bodyY, w: bodyW, h: bodyH, rotation: 0.08 });
+    drawPartBox(parts.leg, { x: bodyX + bodyW * 0.68, y: bodyY + bodyH * 0.72, w: legW, h: legH });
+    drawPartBox(parts.leg, { x: bodyX + bodyW * 0.88, y: bodyY + bodyH * 0.72, w: legW, h: legH });
+    drawPartBox(parts.head, {
+      x: bodyX + bodyW * 0.58,
+      y: bodyY - headH * 0.26,
+      w: headW,
+      h: headH,
+      rotation: -0.06,
+    });
 
     ctx.fillStyle = 'rgba(223, 246, 255, 0.8)';
     ctx.font = '13px purrabet-regular, sans-serif';
     ctx.fillText('Live in-game body composition preview', 16, 24);
-  }, [parts]);
+  }, [layout, parts]);
 
   return (
     <canvas
@@ -593,6 +644,9 @@ const DrawingEditor = ({
   };
 
   const removePart = (partKey, partId) => {
+    const target = (partLibrary[partKey] || []).find((item) => item.id === partId);
+    if (target?.isSystemDefault) return;
+
     setPartLibrary((prev) => ({
       ...prev,
       [partKey]: (prev[partKey] || []).filter((item) => item.id !== partId),
@@ -611,8 +665,10 @@ const DrawingEditor = ({
     const selectedId = selectedParts[partKey];
     if (!selectedId) return 'Game default';
 
-    const exists = (partLibrary[partKey] || []).some((item) => item.id === selectedId);
-    return exists ? 'Selected image' : 'Game default';
+    const selected = (partLibrary[partKey] || []).find((item) => item.id === selectedId);
+    if (!selected) return 'Game default';
+    if (selected.isSystemDefault) return 'System default';
+    return 'Selected image';
   };
 
   const handleComplete = () => {
@@ -700,14 +756,18 @@ const DrawingEditor = ({
                             <img src={item.dataUrl} alt={item.name} style={s.choiceImg} />
                             <span style={s.choiceLabel}>{item.name}</span>
                           </button>
-                          <button
-                            type="button"
-                            style={s.removeChoiceBtn}
-                            onClick={() => removePart(partKey, item.id)}
-                            title="Delete from library"
-                          >
-                            X
-                          </button>
+                          {item.isSystemDefault ? (
+                            <span style={s.defaultTag}>Default</span>
+                          ) : (
+                            <button
+                              type="button"
+                              style={s.removeChoiceBtn}
+                              onClick={() => removePart(partKey, item.id)}
+                              title="Delete from library"
+                            >
+                              X
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -921,6 +981,18 @@ const s = {
     height: 24,
     fontSize: 10,
     cursor: 'pointer',
+  },
+  defaultTag: {
+    fontSize: 10,
+    lineHeight: '24px',
+    minWidth: 40,
+    textAlign: 'center',
+    borderRadius: 8,
+    border: '1px solid rgba(123, 226, 255, 0.42)',
+    background: 'rgba(123, 226, 255, 0.16)',
+    color: '#d9f7ff',
+    padding: '0 6px',
+    boxSizing: 'border-box',
   },
   emptyChoiceHint: {
     fontSize: 12,
