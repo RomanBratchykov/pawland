@@ -1,19 +1,48 @@
 import { requireSupabase } from './supabaseClient.js';
 
+const PROFILE_UPSERT_RETRY_DELAYS_MS = [120, 300, 700];
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 export async function ensureProfile(user) {
+  if (!user?.id) {
+    throw new Error('Cannot bootstrap profile without an authenticated user id.');
+  }
+
   const client = requireSupabase();
+  const email = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
 
   const payload = {
     id: user.id,
-    email: user.email || null,
-    username: user.email?.split('@')?.[0] || 'cat-player',
+    email: email || null,
+    username: email.split('@')?.[0] || 'cat-player',
   };
 
-  const { error } = await client
-    .from('profiles')
-    .upsert(payload, { onConflict: 'id' });
+  let lastError = null;
 
-  if (error) throw error;
+  for (let attempt = 0; attempt <= PROFILE_UPSERT_RETRY_DELAYS_MS.length; attempt += 1) {
+    const { error } = await client
+      .from('profiles')
+      .upsert(payload, { onConflict: 'id' });
+
+    if (!error) {
+      return;
+    }
+
+    lastError = error;
+    const retryDelayMs = PROFILE_UPSERT_RETRY_DELAYS_MS[attempt];
+    if (!Number.isFinite(retryDelayMs)) {
+      break;
+    }
+
+    await wait(retryDelayMs);
+  }
+
+  throw lastError;
 }
 
 export async function getMyCat(userId) {

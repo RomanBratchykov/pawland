@@ -746,11 +746,15 @@ const App = () => {
     }
     setErrorText('');
 
-    await withTimeout(
-      ensureProfile(sessionUser),
-      LOAD_DATA_TIMEOUT_MS,
-      'Profile request timed out. Please try again.'
-    );
+    try {
+      await withTimeout(
+        ensureProfile(sessionUser),
+        LOAD_DATA_TIMEOUT_MS,
+        'Profile request timed out. Please try again.'
+      );
+    } catch (error) {
+      console.warn('[Auth] Profile bootstrap failed, continuing without profile row.', error);
+    }
 
     const cat = await withTimeout(
       getMyCat(sessionUser.id),
@@ -864,6 +868,8 @@ const App = () => {
     event.preventDefault();
     if (!supabase) return;
 
+    const trimmedEmail = email.trim().toLowerCase();
+
     setBusy(true);
     setAuthNotice('');
     setErrorText('');
@@ -871,23 +877,32 @@ const App = () => {
     try {
       if (authMode === 'register') {
         const { data, error } = await supabase.auth.signUp({
-          email: email.trim(),
+          email: trimmedEmail,
           password,
+          options: {
+            emailRedirectTo: window.location.origin,
+          },
         });
         if (error) throw error;
 
-        if (!data.session) {
-          setAuthNotice('Registration created. Confirm email if your Supabase project requires it.');
+        if (data.session?.user) {
+          await loadUserData(data.session.user, { showLoading: true });
+        } else {
+          setAuthMode('login');
+          setAuthNotice('Registration created. Confirm email if required, then log in.');
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
+          email: trimmedEmail,
           password,
         });
         if (error) throw error;
       }
     } catch (error) {
-      setErrorText(sanitizeError(error, 'Authentication failed.'));
+      const fallbackError = authMode === 'register'
+        ? 'Registration failed. Please try again.'
+        : 'Authentication failed.';
+      setErrorText(sanitizeError(error, fallbackError));
     } finally {
       setBusy(false);
     }
