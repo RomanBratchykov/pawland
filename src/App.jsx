@@ -225,6 +225,8 @@ const App = () => {
   const localPresenceKeyRef = useRef('');
   const lastPresenceTrackAtRef = useRef(0);
   const lastRealtimeRestartAtRef = useRef(0);
+  const remoteSkinCacheRef = useRef(new Map());
+  const remoteSkinPromiseRef = useRef(new Map());
   const chatInputRef = useRef(null);
   const tabIdRef = useRef(createTabId());
   const roomLinkResetTimerRef = useRef(null);
@@ -530,6 +532,38 @@ const App = () => {
     lastRealtimeRestartAtRef.current = now;
     console.warn(`[Realtime] Restart requested (${reason})`);
     setRealtimeRestartNonce((prev) => prev + 1);
+  }, []);
+
+  const getRemoteSkinParts = useCallback(async (userId) => {
+    if (!userId) return null;
+
+    if (remoteSkinCacheRef.current.has(userId)) {
+      return remoteSkinCacheRef.current.get(userId);
+    }
+
+    const running = remoteSkinPromiseRef.current.get(userId);
+    if (running) {
+      return running;
+    }
+
+    const task = (async () => {
+      try {
+        const cat = await getMyCat(userId);
+        const parts = await buildSkinCanvasesFromCat(cat);
+        const normalized = parts && Object.keys(parts).length > 0 ? parts : null;
+        remoteSkinCacheRef.current.set(userId, normalized);
+        return normalized;
+      } catch (error) {
+        console.warn('[RemoteSkin] Failed to load remote skin', error?.message || error);
+        remoteSkinCacheRef.current.set(userId, null);
+        return null;
+      } finally {
+        remoteSkinPromiseRef.current.delete(userId);
+      }
+    })();
+
+    remoteSkinPromiseRef.current.set(userId, task);
+    return task;
   }, []);
 
   const copyRoomLink = useCallback(async () => {
@@ -921,6 +955,28 @@ const App = () => {
   }, [remotePlayers]);
 
   useEffect(() => {
+    if (!gameRef.current) return;
+    if (remotePlayers.length === 0) return;
+
+    let isCancelled = false;
+
+    remotePlayers.forEach((player) => {
+      const remoteId = player?.presenceKey || player?.userId;
+      const remoteUserId = player?.userId;
+      if (!remoteId || !remoteUserId) return;
+
+      getRemoteSkinParts(remoteUserId).then((parts) => {
+        if (isCancelled) return;
+        gameRef.current?.setRemotePlayerSkin(remoteId, parts);
+      });
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [getRemoteSkinParts, remotePlayers]);
+
+  useEffect(() => {
     if (screen !== SCREEN.ROOM) {
       setChatOpen(false);
       setChatText('');
@@ -1219,6 +1275,8 @@ const App = () => {
     if (screen === SCREEN.ROOM) return;
     setBroadcastPlayers([]);
     setChatMessages([]);
+    remoteSkinPromiseRef.current.clear();
+    remoteSkinCacheRef.current.clear();
   }, [screen]);
 
   const roomWrapperStyle = useMemo(() => {

@@ -186,6 +186,7 @@ export class Game {
     this._remotePlayers = new Map();
     this._pendingRemotePlayers = [];
     this._pendingRemoteBubbles = new Map();
+    this._pendingRemoteSkins = new Map();
     this._chatBubbles = new Map();
     this._chatTimers = new Map();
     this._skeletonData = null;
@@ -337,6 +338,12 @@ export class Game {
           this.setRemoteChatBubble(id, queuedMessage);
           this._pendingRemoteBubbles.delete(id);
         }
+
+        if (this._pendingRemoteSkins.has(id)) {
+          const queuedSkin = this._pendingRemoteSkins.get(id);
+          this._applyRemoteSkin(entry, queuedSkin);
+          this._pendingRemoteSkins.delete(id);
+        }
       }
 
       this._updateRemotePlayer(entry, player);
@@ -371,6 +378,33 @@ export class Game {
     }
 
     this._setChatBubble(`remote:${userId}`, entry.container, cleanText);
+  }
+
+  setRemotePlayerSkin(userId, parts) {
+    if (!userId) return;
+
+    const entry = this._remotePlayers.get(userId);
+    if (!entry) {
+      this._pendingRemoteSkins.set(userId, parts || null);
+      return;
+    }
+
+    this._applyRemoteSkin(entry, parts || null);
+  }
+
+  _applyRemoteSkin(entry, parts) {
+    if (!entry?.skinSystem || !entry?.skinEntity) return;
+
+    if (entry.lastSkinSource === parts) return;
+    entry.lastSkinSource = parts;
+
+    const hasParts = Boolean(parts && Object.keys(parts).length > 0);
+    if (!hasParts) {
+      entry.skinSystem.reset(entry.skinEntity);
+      return;
+    }
+
+    entry.skinSystem.applyParts(entry.skinEntity, parts);
   }
 
   addEntity(entity) { return this._world.addEntity(entity); }
@@ -564,6 +598,8 @@ export class Game {
         entry.spine.state.setAnimation(0, wantedAnim, true);
         entry.currentAnim = wantedAnim;
       }
+
+      entry.skinSystem?.update();
     }
   }
 
@@ -590,6 +626,10 @@ export class Game {
   _createRemotePlayer(player) {
     const container = new PIXI.Container();
     const spine = new Spine(this._skeletonData);
+    const skinSystem = new CustomSkinSystem(this._app);
+    const skinEntity = {
+      get: (ComponentClass) => (ComponentClass === SpineComponent ? { instance: spine } : null),
+    };
     const baseScale = 0.5;
     const initialX = Number.isFinite(player?.x) ? player.x : CONFIG.WIDTH / 2;
     const initialY = Number.isFinite(player?.y) ? player.y : CONFIG.FLOOR_Y;
@@ -619,6 +659,8 @@ export class Game {
       container,
       spine,
       label,
+      skinSystem,
+      skinEntity,
       baseScale,
       currentAnim: CONFIG.ANIM.STAND,
       sceneRoom: typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM,
@@ -627,6 +669,7 @@ export class Game {
       targetX: initialX,
       targetY: initialY,
       movementHoldUntil: 0,
+      lastSkinSource: null,
     };
   }
 
@@ -729,6 +772,7 @@ export class Game {
 
   _destroyRemotePlayer(id, entry) {
     this._clearChatBubble(`remote:${id}`);
+    entry.skinSystem?.destroy();
     entry.container.parent?.removeChild(entry.container);
     entry.container.destroy({ children: true, texture: false, baseTexture: false });
   }
@@ -780,6 +824,7 @@ export class Game {
       this._destroyRemotePlayer(id, entry);
     }
     this._remotePlayers.clear();
+    this._pendingRemoteSkins.clear();
 
     this._world.destroy();
     this._app.destroy(true, { children: true, texture: true });
