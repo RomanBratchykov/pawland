@@ -38,9 +38,10 @@ const DEFAULT_SCENE_ROOM = 'courtyard';
 const SCENE_EDGE_THRESHOLD_PX = 6;
 const SCENE_TRANSITION_COOLDOWN_MS = 520;
 const INTERACT_DISTANCE_PX = 102;
-const REMOTE_INTERPOLATION_FACTOR = 0.28;
+const REMOTE_INTERPOLATION_FACTOR = 0.2;
 const REMOTE_SNAP_DISTANCE_PX = 240;
 const REMOTE_MOVE_HOLD_MS = 220;
+const MAX_RENDER_RESOLUTION = 1.5;
 
 const SCENE_ROOMS = {
   courtyard: {
@@ -196,16 +197,20 @@ export class Game {
     this._interactConsumed = false;
     this._sceneObjectLayer = null;
 
+    const renderResolution = Math.min(window.devicePixelRatio || 1, MAX_RENDER_RESOLUTION);
+
     this._app = new PIXI.Application({
       width:           CONFIG.WIDTH,
       height:          CONFIG.HEIGHT,
       backgroundColor: CONFIG.BG_COLOR,
       view:            canvas,
       antialias:       true,
-      resolution:      window.devicePixelRatio || 1,
+      resolution:      renderResolution,
       autoDensity:     true,
     });
     this._app.renderer.roundPixels = true;
+    this._app.ticker.maxFPS = 60;
+    this._app.ticker.minFPS = 30;
 
     this._world      = new World();
     this._catEntity  = null;
@@ -400,10 +405,12 @@ export class Game {
 
     const hasParts = Boolean(parts && Object.keys(parts).length > 0);
     if (!hasParts) {
+      entry.skinEnabled = false;
       entry.skinSystem.reset(entry.skinEntity);
       return;
     }
 
+    entry.skinEnabled = true;
     entry.skinSystem.applyParts(entry.skinEntity, parts);
   }
 
@@ -590,6 +597,8 @@ export class Game {
       } else if (distance > 0.01) {
         entry.container.x += dx * REMOTE_INTERPOLATION_FACTOR;
         entry.container.y += dy * REMOTE_INTERPOLATION_FACTOR;
+        if (Math.abs(entry.targetX - entry.container.x) < 0.08) entry.container.x = entry.targetX;
+        if (Math.abs(entry.targetY - entry.container.y) < 0.08) entry.container.y = entry.targetY;
       }
 
       const isMoving = distance > 0.65 || now < entry.movementHoldUntil;
@@ -599,7 +608,9 @@ export class Game {
         entry.currentAnim = wantedAnim;
       }
 
-      entry.skinSystem?.update();
+      if (entry.skinEnabled && entry.container.visible) {
+        entry.skinSystem?.update();
+      }
     }
   }
 
@@ -670,6 +681,7 @@ export class Game {
       targetY: initialY,
       movementHoldUntil: 0,
       lastSkinSource: null,
+      skinEnabled: false,
     };
   }
 

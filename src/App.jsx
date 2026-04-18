@@ -4,7 +4,7 @@ import { Game } from './game/Game.js';
 import { CONFIG } from './config.js';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 import { catRecordToEditorInitial, ensureProfile, getMyCat, saveMyCat } from './lib/catPersistence.js';
-import { buildSkinCanvasesFromCat, canvasesToDataUrls } from './lib/catSkin.js';
+import { buildSkinCanvasesFromCat, canvasesToDataUrls, dataUrlsToCanvases } from './lib/catSkin.js';
 
 const SCREEN = {
   LOADING: 'loading',
@@ -16,12 +16,14 @@ const SCREEN = {
 
 const CHAT_MAX_LENGTH = 120;
 const CHAT_POOL_LIMIT = 40;
+const CONNECTION_CHAT_HISTORY_LIMIT = 16;
 const PRESENCE_STALE_AFTER_MS = 15000;
 const REMOTE_BROADCAST_STALE_AFTER_MS = 20000;
 const PRESENCE_TRACK_INTERVAL_MS = 1400;
 const PRESENCE_HEARTBEAT_INTERVAL_MS = 3000;
 const REALTIME_RESTART_COOLDOWN_MS = 1800;
 const LOAD_DATA_TIMEOUT_MS = 16000;
+const SKIN_REQUEST_COOLDOWN_MS = 3200;
 const DEFAULT_SCENE_ROOM = 'courtyard';
 
 const ROOM_NAME_PARAM = new URLSearchParams(window.location.search).get('room');
@@ -189,6 +191,15 @@ function mergeRealtimePlayers(primary = [], secondary = []) {
   return Array.from(byPresence.values());
 }
 
+function buildSkinSignature(skinParts) {
+  if (!skinParts || typeof skinParts !== 'object') return '';
+
+  return Object.entries(skinParts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}:${String(value || '').length}`)
+    .join('|');
+}
+
 const App = () => {
   const [screen, setScreen] = useState(SCREEN.LOADING);
   const [user, setUser] = useState(null);
@@ -225,8 +236,11 @@ const App = () => {
   const localPresenceKeyRef = useRef('');
   const lastPresenceTrackAtRef = useRef(0);
   const lastRealtimeRestartAtRef = useRef(0);
-  const remoteSkinCacheRef = useRef(new Map());
-  const remoteSkinPromiseRef = useRef(new Map());
+  const remoteSkinByPresenceRef = useRef(new Map());
+  const remoteSkinSignatureRef = useRef(new Map());
+  const pendingSkinRequestAtRef = useRef(new Map());
+  const broadcastPlayersByPresenceRef = useRef(new Map());
+  const broadcastFlushTimerRef = useRef(null);
   const chatInputRef = useRef(null);
   const tabIdRef = useRef(createTabId());
   const roomLinkResetTimerRef = useRef(null);
@@ -239,6 +253,8 @@ const App = () => {
   const themeAudioRef = useRef(null);
   const pendingThemeSrcRef = useRef(null);
   const activeThemeSrcRef = useRef(null);
+  const localSkinPayloadRef = useRef(null);
+  const localSkinSignatureRef = useRef('');
 
   const isMobileDevice = useMemo(() => {
     if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -534,37 +550,42 @@ const App = () => {
     setRealtimeRestartNonce((prev) => prev + 1);
   }, []);
 
-  const getRemoteSkinParts = useCallback(async (userId) => {
-    if (!userId) return null;
+  const applyRemoteSkinToGame = useCallback((presenceKey, skinParts) => {
+    if (!presenceKey) return;
+    if (!gameRef.current?.setRemotePlayerSkin) return;
 
-    if (remoteSkinCacheRef.current.has(userId)) {
-      return remoteSkinCacheRef.current.get(userId);
-    }
-
-    const running = remoteSkinPromiseRef.current.get(userId);
-    if (running) {
-      return running;
-    }
-
-    const task = (async () => {
-      try {
-        const cat = await getMyCat(userId);
-        const parts = await buildSkinCanvasesFromCat(cat);
-        const normalized = parts && Object.keys(parts).length > 0 ? parts : null;
-        remoteSkinCacheRef.current.set(userId, normalized);
-        return normalized;
-      } catch (error) {
-        console.warn('[RemoteSkin] Failed to load remote skin', error?.message || error);
-        remoteSkinCacheRef.current.set(userId, null);
-        return null;
-      } finally {
-        remoteSkinPromiseRef.current.delete(userId);
-      }
-    })();
-
-    remoteSkinPromiseRef.current.set(userId, task);
-    return task;
+    const sanitized = skinParts && Object.keys(skinParts).length > 0 ? skinParts : null;
+    remoteSkinByPresenceRef.current.set(presenceKey, sanitized);
+    gameRef.current.setRemotePlayerSkin(presenceKey, sanitized);
   }, []);
+
+  const handleRemoteSkinPayload = useCallback((presenceKey, payload) => {
+    if (!presenceKey) return;
+
+    const signature = buildSkinSignature(payload);
+    if (remoteSkinSignatureRef.current.get(presenceKey) === signature) {
+      return;
+    }
+
+    remoteSkinSignatureRef.current.set(presenceKey, signature);
+
+    if (signature === '') {
+      applyRemoteSkinToGame(presenceKey, null);
+      return;
+    }
+
+    dataUrlsToCanvases(payload)
+      .then((parts) => {
+        if (remoteSkinSignatureRef.current.get(presenceKey) !== signature) {
+          return;
+        }
+        applyRemoteSkinToGame(presenceKey, parts);
+      })
+      .catch((error) => {
+        remoteSkinSignatureRef.current.delete(presenceKey);
+        console.warn('[RemoteSkin] Failed to decode skin payload', error?.message || error);
+      });
+  }, [applyRemoteSkinToGame]);
 
   const copyRoomLink = useCallback(async () => {
     const url = new URL(window.location.href);
@@ -916,6 +937,8 @@ const App = () => {
         appendChatMessage({
           id: `world-${Date.now()}`,
           sender: 'World',
+          connectionKey: 'world',
+          connectionLabel: 'World',
           message: payload.message,
           mine: false,
           at: Date.now(),
@@ -949,32 +972,105 @@ const App = () => {
     return mergedPlayers.filter((player) => player.presenceKey !== localPresenceKeyRef.current);
   }, [onlinePlayers, broadcastPlayers, user]);
 
+  const connectionChats = useMemo(() => {
+    const byConnection = new Map();
+
+    chatMessages.forEach((item) => {
+      const fallbackSender = typeof item?.sender === 'string' && item.sender ? item.sender : 'Connection';
+      const explicitKey = typeof item?.connectionKey === 'string' && item.connectionKey
+        ? item.connectionKey
+        : '';
+      const connectionKey = explicitKey || (item?.mine ? 'local-self' : `sender:${fallbackSender}`);
+      const connectionLabel = typeof item?.connectionLabel === 'string' && item.connectionLabel
+        ? item.connectionLabel
+        : fallbackSender;
+      const itemAt = Number(item?.at);
+      const at = Number.isFinite(itemAt) ? itemAt : 0;
+
+      if (!byConnection.has(connectionKey)) {
+        byConnection.set(connectionKey, {
+          connectionKey,
+          label: connectionLabel,
+          mine: Boolean(item?.mine),
+          latestAt: at,
+          messages: [],
+        });
+      }
+
+      const bucket = byConnection.get(connectionKey);
+      bucket.mine = bucket.mine || Boolean(item?.mine);
+      bucket.latestAt = Math.max(bucket.latestAt, at);
+      bucket.messages.push(item);
+    });
+
+    return Array.from(byConnection.values())
+      .map((bucket) => ({
+        ...bucket,
+        messages: bucket.messages
+          .slice()
+          .sort((a, b) => (Number(a?.at) || 0) - (Number(b?.at) || 0))
+          .slice(-CONNECTION_CHAT_HISTORY_LIMIT),
+      }))
+      .sort((a, b) => b.latestAt - a.latestAt);
+  }, [chatMessages]);
+
   useEffect(() => {
     if (!gameRef.current) return;
     gameRef.current.setRemotePlayers(remotePlayers);
   }, [remotePlayers]);
 
   useEffect(() => {
-    if (!gameRef.current) return;
-    if (remotePlayers.length === 0) return;
+    const game = gameRef.current;
+    if (!game) return;
 
-    let isCancelled = false;
+    const activeKeys = new Set(
+      remotePlayers
+        .map((player) => player?.presenceKey)
+        .filter((key) => typeof key === 'string' && key)
+    );
 
-    remotePlayers.forEach((player) => {
-      const remoteId = player?.presenceKey || player?.userId;
-      const remoteUserId = player?.userId;
-      if (!remoteId || !remoteUserId) return;
-
-      getRemoteSkinParts(remoteUserId).then((parts) => {
-        if (isCancelled) return;
-        gameRef.current?.setRemotePlayerSkin(remoteId, parts);
-      });
+    Array.from(remoteSkinByPresenceRef.current.keys()).forEach((presenceKey) => {
+      if (activeKeys.has(presenceKey)) return;
+      remoteSkinByPresenceRef.current.delete(presenceKey);
+      remoteSkinSignatureRef.current.delete(presenceKey);
+      pendingSkinRequestAtRef.current.delete(presenceKey);
     });
 
-    return () => {
-      isCancelled = true;
-    };
-  }, [getRemoteSkinParts, remotePlayers]);
+    if (remotePlayers.length === 0) return;
+
+    const now = Date.now();
+    const localPresenceKey = localPresenceKeyRef.current;
+    const channel = roomChannelRef.current;
+
+    remotePlayers.forEach((player) => {
+      const remotePresenceKey = player?.presenceKey;
+      if (!remotePresenceKey || remotePresenceKey === localPresenceKey) return;
+
+      if (remoteSkinByPresenceRef.current.has(remotePresenceKey)) {
+        const existingParts = remoteSkinByPresenceRef.current.get(remotePresenceKey);
+        game.setRemotePlayerSkin(remotePresenceKey, existingParts);
+        return;
+      }
+
+      if (!channel) return;
+
+      const lastRequestedAt = pendingSkinRequestAtRef.current.get(remotePresenceKey) || 0;
+      if (now - lastRequestedAt < SKIN_REQUEST_COOLDOWN_MS) return;
+
+      pendingSkinRequestAtRef.current.set(remotePresenceKey, now);
+      channel.send({
+        type: 'broadcast',
+        event: 'skin-request',
+        payload: {
+          targetPresenceKey: remotePresenceKey,
+          fromPresenceKey: localPresenceKey,
+          askedAt: now,
+        },
+      }).catch((error) => {
+        console.warn('[Realtime] skin-request failed', error?.message || error);
+      });
+    });
+  }, [remotePlayers]);
 
   useEffect(() => {
     if (screen !== SCREEN.ROOM) {
@@ -1065,6 +1161,43 @@ const App = () => {
     };
   }, [releaseJumpKey, stopJoystick]);
 
+  const localSkinPayload = useMemo(() => {
+    if (!skinCanvases || typeof skinCanvases !== 'object') return null;
+    const encoded = canvasesToDataUrls(skinCanvases);
+    if (!encoded || typeof encoded !== 'object' || Object.keys(encoded).length === 0) {
+      return null;
+    }
+    return encoded;
+  }, [skinCanvases]);
+
+  const localSkinSignature = useMemo(() => {
+    return buildSkinSignature(localSkinPayload);
+  }, [localSkinPayload]);
+
+  useEffect(() => {
+    localSkinPayloadRef.current = localSkinPayload;
+    localSkinSignatureRef.current = localSkinSignature;
+  }, [localSkinPayload, localSkinSignature]);
+
+  const broadcastLocalSkinSync = useCallback(async (targetPresenceKey = null) => {
+    const channel = roomChannelRef.current;
+    const localPresenceKey = localPresenceKeyRef.current;
+    if (!channel || !localPresenceKey) return;
+
+    await channel.send({
+      type: 'broadcast',
+      event: 'skin-sync',
+      payload: {
+        userId: userRef.current?.id || '',
+        presenceKey: localPresenceKey,
+        signature: localSkinSignatureRef.current,
+        skinParts: localSkinPayloadRef.current,
+        targetPresenceKey,
+        sentAt: Date.now(),
+      },
+    });
+  }, []);
+
   const sendChatMessage = useCallback(async (rawText) => {
     if (!user) return;
 
@@ -1074,9 +1207,12 @@ const App = () => {
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
 
     gameRef.current?.setLocalChatBubble(message);
+    const localPresenceKey = localPresenceKeyRef.current || user.id;
     appendChatMessage({
       id: `local-${Date.now()}`,
       sender: localName,
+      connectionKey: localPresenceKey,
+      connectionLabel: `${localName} (you)`,
       message,
       mine: true,
       at: Date.now(),
@@ -1090,7 +1226,7 @@ const App = () => {
       event: 'chat',
       payload: {
         userId: user.id,
-        presenceKey: localPresenceKeyRef.current,
+        presenceKey: localPresenceKey,
         name: localName,
         message,
         sentAt: Date.now(),
@@ -1111,9 +1247,18 @@ const App = () => {
   };
 
   useEffect(() => {
+    if (screen !== SCREEN.ROOM) return;
+
+    broadcastLocalSkinSync().catch((error) => {
+      console.warn('[Realtime] skin-sync broadcast failed', error?.message || error);
+    });
+  }, [broadcastLocalSkinSync, localSkinSignature, screen]);
+
+  useEffect(() => {
     if (!supabase || screen !== SCREEN.ROOM || !user) return undefined;
 
     let isDisposed = false;
+    const broadcastPlayersByPresence = broadcastPlayersByPresenceRef.current;
 
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
     const localPresenceKey = `${user.id}:${tabIdRef.current}`;
@@ -1147,6 +1292,30 @@ const App = () => {
       setOnlinePlayers(toPresencePlayers(currentState));
     };
 
+    const flushBroadcastPlayers = () => {
+      const now = Date.now();
+      const next = [];
+
+      broadcastPlayersByPresence.forEach((player, presenceKey) => {
+        const updatedAt = Number(player?.updatedAt);
+        if (!Number.isFinite(updatedAt) || now - updatedAt > REMOTE_BROADCAST_STALE_AFTER_MS) {
+          broadcastPlayersByPresence.delete(presenceKey);
+          return;
+        }
+        next.push(player);
+      });
+
+      setBroadcastPlayers(next);
+    };
+
+    const scheduleBroadcastFlush = () => {
+      if (broadcastFlushTimerRef.current) return;
+      broadcastFlushTimerRef.current = window.setTimeout(() => {
+        broadcastFlushTimerRef.current = null;
+        flushBroadcastPlayers();
+      }, 90);
+    };
+
     const trackPresence = async () => {
       if (isDisposed || !localPresenceRef.current) return;
       try {
@@ -1165,7 +1334,12 @@ const App = () => {
     };
 
     channel.on('presence', { event: 'sync' }, syncPresenceState);
-    channel.on('presence', { event: 'join' }, syncPresenceState);
+    channel.on('presence', { event: 'join' }, () => {
+      syncPresenceState();
+      broadcastLocalSkinSync().catch((error) => {
+        console.warn('[Realtime] join skin-sync failed', error?.message || error);
+      });
+    });
     channel.on('presence', { event: 'leave' }, syncPresenceState);
 
     channel.on('broadcast', { event: 'state' }, (event) => {
@@ -1174,23 +1348,8 @@ const App = () => {
       if (!remotePlayer) return;
       if (remotePlayer.presenceKey === localPresenceKeyRef.current) return;
 
-      setBroadcastPlayers((prev) => {
-        const now = Date.now();
-        const nextByKey = new Map();
-
-        prev.forEach((player) => {
-          const updatedAt = Number(player?.updatedAt);
-          if (Number.isFinite(updatedAt) && now - updatedAt > REMOTE_BROADCAST_STALE_AFTER_MS) {
-            return;
-          }
-          if (player?.presenceKey) {
-            nextByKey.set(player.presenceKey, player);
-          }
-        });
-
-        nextByKey.set(remotePlayer.presenceKey, remotePlayer);
-        return Array.from(nextByKey.values());
-      });
+      broadcastPlayersByPresence.set(remotePlayer.presenceKey, remotePlayer);
+      scheduleBroadcastFlush();
     });
 
     channel.on('broadcast', { event: 'chat' }, (event) => {
@@ -1209,6 +1368,8 @@ const App = () => {
       appendChatMessage({
         id: `remote-${Date.now()}-${bubbleId}`,
         sender,
+        connectionKey: bubbleId,
+        connectionLabel: sender,
         message,
         mine: false,
         at: Date.now(),
@@ -1216,9 +1377,38 @@ const App = () => {
       gameRef.current?.setRemoteChatBubble(bubbleId, message);
     });
 
+    channel.on('broadcast', { event: 'skin-sync' }, (event) => {
+      const payload = event?.payload || event || {};
+      const sourcePresenceKey = typeof payload.presenceKey === 'string' ? payload.presenceKey : '';
+      const targetPresenceKey = typeof payload.targetPresenceKey === 'string' ? payload.targetPresenceKey : '';
+      if (!sourcePresenceKey || sourcePresenceKey === localPresenceKeyRef.current) return;
+      if (targetPresenceKey && targetPresenceKey !== localPresenceKeyRef.current) return;
+
+      pendingSkinRequestAtRef.current.delete(sourcePresenceKey);
+      handleRemoteSkinPayload(sourcePresenceKey, payload.skinParts || null);
+    });
+
+    channel.on('broadcast', { event: 'skin-request' }, (event) => {
+      const payload = event?.payload || event || {};
+      const targetPresenceKey = typeof payload.targetPresenceKey === 'string' ? payload.targetPresenceKey : '';
+      const requesterPresenceKey = typeof payload.fromPresenceKey === 'string' ? payload.fromPresenceKey : '';
+
+      if (targetPresenceKey && targetPresenceKey !== localPresenceKeyRef.current) return;
+      if (requesterPresenceKey && requesterPresenceKey === localPresenceKeyRef.current) return;
+
+      broadcastLocalSkinSync(requesterPresenceKey || null).catch((error) => {
+        console.warn('[Realtime] targeted skin-sync failed', error?.message || error);
+      });
+    });
+
     channel.subscribe((status) => {
       if (status === 'SUBSCRIBED') {
-        trackPresence().finally(syncPresenceState);
+        trackPresence().finally(() => {
+          syncPresenceState();
+          broadcastLocalSkinSync().catch((error) => {
+            console.warn('[Realtime] initial skin-sync failed', error?.message || error);
+          });
+        });
         return;
       }
 
@@ -1244,12 +1434,7 @@ const App = () => {
     }, PRESENCE_HEARTBEAT_INTERVAL_MS);
 
     const pruneBroadcastTimer = window.setInterval(() => {
-      const now = Date.now();
-      setBroadcastPlayers((prev) => prev.filter((player) => {
-        const updatedAt = Number(player?.updatedAt);
-        if (!Number.isFinite(updatedAt)) return false;
-        return now - updatedAt <= REMOTE_BROADCAST_STALE_AFTER_MS;
-      }));
+      flushBroadcastPlayers();
     }, 1500);
 
     document.addEventListener('visibilitychange', refreshRealtime);
@@ -1259,6 +1444,11 @@ const App = () => {
       isDisposed = true;
       window.clearInterval(heartbeatTimer);
       window.clearInterval(pruneBroadcastTimer);
+      if (broadcastFlushTimerRef.current) {
+        window.clearTimeout(broadcastFlushTimerRef.current);
+        broadcastFlushTimerRef.current = null;
+      }
+      broadcastPlayersByPresence.clear();
       document.removeEventListener('visibilitychange', refreshRealtime);
       window.removeEventListener('online', refreshRealtime);
       setOnlinePlayers([]);
@@ -1269,14 +1459,29 @@ const App = () => {
       lastPresenceTrackAtRef.current = 0;
       supabase.removeChannel(channel);
     };
-  }, [screen, user, catRecord?.name, appendChatMessage, requestRealtimeRestart, realtimeRestartNonce]);
+  }, [
+    screen,
+    user,
+    catRecord?.name,
+    appendChatMessage,
+    requestRealtimeRestart,
+    realtimeRestartNonce,
+    broadcastLocalSkinSync,
+    handleRemoteSkinPayload,
+  ]);
 
   useEffect(() => {
     if (screen === SCREEN.ROOM) return;
     setBroadcastPlayers([]);
+    broadcastPlayersByPresenceRef.current.clear();
+    if (broadcastFlushTimerRef.current) {
+      window.clearTimeout(broadcastFlushTimerRef.current);
+      broadcastFlushTimerRef.current = null;
+    }
     setChatMessages([]);
-    remoteSkinPromiseRef.current.clear();
-    remoteSkinCacheRef.current.clear();
+    remoteSkinByPresenceRef.current.clear();
+    remoteSkinSignatureRef.current.clear();
+    pendingSkinRequestAtRef.current.clear();
   }, [screen]);
 
   const roomWrapperStyle = useMemo(() => {
@@ -1547,16 +1752,36 @@ const App = () => {
       ) : null}
 
       <div style={styles.chatPool}>
-        {chatMessages.length === 0 ? (
+        {connectionChats.length === 0 ? (
           <span style={styles.chatPoolEmpty}>
             {isMobileDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
           </span>
-        ) : chatMessages.map((item) => (
-          <div key={item.id} style={{ ...styles.chatPoolItem, ...(item.mine ? styles.chatPoolItemMine : null) }}>
-            <strong style={styles.chatPoolSender}>{item.sender}</strong>
-            <span style={styles.chatPoolMessage}>{item.message}</span>
+        ) : (
+          <div style={styles.connectionChatGrid}>
+            {connectionChats.map((connection) => (
+              <section
+                key={connection.connectionKey}
+                style={{
+                  ...styles.connectionChatCard,
+                  ...(connection.mine ? styles.connectionChatCardMine : null),
+                }}
+              >
+                <div style={styles.connectionChatHeader}>
+                  <strong style={styles.connectionChatSender}>{connection.label}</strong>
+                  <span style={styles.connectionChatCount}>{connection.messages.length} msgs</span>
+                </div>
+
+                <div style={styles.connectionChatBody}>
+                  {connection.messages.map((item) => (
+                    <div key={item.id} style={styles.connectionChatRow}>
+                      <span style={styles.connectionChatMessage}>{item.message}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
           </div>
-        ))}
+        )}
       </div>
 
       {remotePlayers.length > 0 ? (
@@ -1869,11 +2094,11 @@ const styles = {
     border: '1px solid rgba(255,255,255,0.16)',
     borderRadius: 10,
     background: 'rgba(5, 13, 24, 0.65)',
-    padding: 8,
+    padding: 10,
     display: 'flex',
     flexDirection: 'column',
-    gap: 6,
-    maxHeight: 180,
+    gap: 10,
+    maxHeight: 320,
     overflowY: 'auto',
   },
   chatPoolEmpty: {
@@ -1881,24 +2106,56 @@ const styles = {
     opacity: 0.7,
     padding: '4px 2px',
   },
-  chatPoolItem: {
+  connectionChatGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    gap: 10,
+  },
+  connectionChatCard: {
     borderRadius: 8,
-    border: '1px solid rgba(255,255,255,0.12)',
-    background: 'rgba(255,255,255,0.05)',
-    padding: '6px 8px',
+    border: '1px solid rgba(196, 223, 255, 0.2)',
+    background: 'linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))',
+    padding: '8px 9px',
     display: 'flex',
     flexDirection: 'column',
-    gap: 2,
+    gap: 8,
+    minHeight: 138,
   },
-  chatPoolItemMine: {
-    border: '1px solid rgba(125, 228, 255, 0.32)',
-    background: 'rgba(125, 228, 255, 0.1)',
+  connectionChatCardMine: {
+    border: '1px solid rgba(125, 228, 255, 0.36)',
+    background: 'linear-gradient(180deg, rgba(125, 228, 255, 0.16), rgba(125, 228, 255, 0.06))',
   },
-  chatPoolSender: {
+  connectionChatHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  connectionChatSender: {
+    fontSize: 12,
+    opacity: 0.9,
+    color: '#f3fbff',
+    lineHeight: 1.2,
+  },
+  connectionChatCount: {
     fontSize: 11,
-    opacity: 0.86,
+    opacity: 0.7,
   },
-  chatPoolMessage: {
+  connectionChatBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    maxHeight: 188,
+    overflowY: 'auto',
+    paddingRight: 3,
+  },
+  connectionChatRow: {
+    borderRadius: 6,
+    border: '1px solid rgba(255,255,255,0.1)',
+    background: 'rgba(4, 14, 28, 0.5)',
+    padding: '6px 7px',
+  },
+  connectionChatMessage: {
     fontSize: 13,
     color: '#eef8ff',
     whiteSpace: 'pre-wrap',
