@@ -34,7 +34,6 @@ class ChatVoiceover {
     this._ready = false;
     this._initPromise = null;
     this._useNativeFallback = false;
-    this._queue = Promise.resolve(false);
   }
 
   get isSupported() {
@@ -79,31 +78,22 @@ class ChatVoiceover {
       : normalizedMessage;
     const text = line.slice(0, MAX_SPOKEN_TEXT_LENGTH);
 
-    this._queue = this._queue
-      .catch(() => false)
-      .then(async () => {
-        if (!this._enabled) return false;
+    if (!this._enabled) return false;
 
-        if (this._speech && !this._useNativeFallback) {
-          try {
-            const ready = await this._ensureReady();
-            if (!ready || !this._enabled) return false;
-
-            await this._speech.speak({
-              text,
-              queue: false,
-            });
-
-            return true;
-          } catch {
-            this._useNativeFallback = true;
-          }
+    if (this._speech && !this._useNativeFallback) {
+      try {
+        const ready = await this._ensureReady();
+        if (ready && this._enabled) {
+          const speakTtsOk = this._speakWithSpeakTts(text);
+          if (speakTtsOk) return true;
+          this._useNativeFallback = true;
         }
+      } catch {
+        this._useNativeFallback = true;
+      }
+    }
 
-        return this._speakWithNativeApi(text);
-      });
-
-    return this._queue;
+    return this._speakWithNativeApi(text);
   }
 
   async _ensureReady() {
@@ -135,40 +125,58 @@ class ChatVoiceover {
   }
 
   _speakWithNativeApi(text) {
-    if (!this._hasNativeSpeech || !this._enabled) return Promise.resolve(false);
+    if (!this._hasNativeSpeech || !this._enabled) return false;
 
-    return new Promise((resolve) => {
-      try {
-        const synth = window.speechSynthesis;
-        const utterance = new SpeechSynthesisUtterance(text);
-        const fallbackLang = typeof navigator !== 'undefined' ? navigator.language || 'en-US' : 'en-US';
-        const normalizedLang = String(fallbackLang).toLowerCase();
-        const langPrefix = normalizedLang.split('-')[0];
+    try {
+      const synth = window.speechSynthesis;
+      const utterance = new SpeechSynthesisUtterance(text);
+      const fallbackLang = typeof navigator !== 'undefined' ? navigator.language || 'en-US' : 'en-US';
+      const normalizedLang = String(fallbackLang).toLowerCase();
+      const langPrefix = normalizedLang.split('-')[0];
 
-        utterance.lang = fallbackLang;
-        utterance.volume = 1;
-        utterance.rate = 1;
-        utterance.pitch = 1;
+      utterance.lang = fallbackLang;
+      utterance.volume = 1;
+      utterance.rate = 1;
+      utterance.pitch = 1;
 
-        const voices = synth.getVoices();
-        const preferredVoice = voices.find((voice) => {
-          const voiceLang = String(voice?.lang || '').toLowerCase();
-          return voiceLang === normalizedLang || voiceLang.startsWith(`${langPrefix}-`);
-        });
+      const voices = synth.getVoices();
+      const preferredVoice = voices.find((voice) => {
+        const voiceLang = String(voice?.lang || '').toLowerCase();
+        return voiceLang === normalizedLang || voiceLang.startsWith(`${langPrefix}-`);
+      });
 
-        if (preferredVoice) {
-          utterance.voice = preferredVoice;
-        }
-
-        utterance.onend = () => resolve(true);
-        utterance.onerror = () => resolve(false);
-
-        synth.cancel();
-        synth.speak(utterance);
-      } catch {
-        resolve(false);
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
       }
-    });
+
+      // Cancel current utterance so the newest chat line always plays.
+      synth.cancel();
+      synth.speak(utterance);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  _speakWithSpeakTts(text) {
+    if (!this._speech || !this._enabled) return false;
+
+    try {
+      const maybePromise = this._speech.speak({
+        text,
+        queue: false,
+      });
+
+      // Some runtimes reject asynchronously after speak() returns.
+      Promise.resolve(maybePromise).catch(() => {
+        this._useNativeFallback = true;
+        this._speakWithNativeApi(text);
+      });
+
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
