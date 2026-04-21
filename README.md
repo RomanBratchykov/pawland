@@ -1,5 +1,6 @@
-# Cat Game
+# Pawland
 
+https://cat-game-iota.vercel.app/
 Cat character creator + Spine-based room game with:
 
 - registration/login (Supabase Auth)
